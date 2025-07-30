@@ -1,4 +1,4 @@
-import { FormatList } from "../sim/dex-formats";
+import type { FormatList } from "../sim/dex-formats";
 
 export const Formats: FormatList = [
 	{
