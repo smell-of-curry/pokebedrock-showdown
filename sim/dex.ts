@@ -461,6 +461,7 @@ export class ModdedDex {
 			case '../data/scripts': dataObject = require('../data/scripts'); break;
 			case '../data/typechart': dataObject = require('../data/typechart'); break;
 			case '../data/learnsets': dataObject = require('../data/learnsets'); break;
+			case '../data/pokemongo': dataObject = require('../data/pokemongo'); break;
 
 			// mods
 			case '../data/mods/ccapm2024/abilities': dataObject = require('../data/mods/ccapm2024/abilities'); break;
