@@ -2,7 +2,7 @@ import { FormatList } from "../sim/dex-formats";
 
 export const Formats: FormatList = [
 	{
-		name: "[Pokebedrock] Singles",
+		name: "[PokeBedrock] Singles",
 		mod: "gen9",
 		gameType: "singles",
 		ruleset: [
@@ -10,7 +10,7 @@ export const Formats: FormatList = [
 		]
 	},
 	{
-		name: "[Pokebedrock] Doubles",
+		name: "[PokeBedrock] Doubles",
 		mod: "gen9",
 		gameType: "doubles",
 		ruleset: [
@@ -18,7 +18,7 @@ export const Formats: FormatList = [
 		]
 	},
 	{
-		name: "[Pokebedrock] Singles [Rated]",
+		name: "[PokeBedrock] Singles [Rated]",
 		mod: "gen9",
 		gameType: "singles",
 		ruleset: [
@@ -26,7 +26,7 @@ export const Formats: FormatList = [
 		]
 	},
 	{
-		name: "[Pokebedrock] Doubles [Rated]",
+		name: "[PokeBedrock] Doubles [Rated]",
 		mod: "gen9",
 		gameType: "doubles",
 		ruleset: [
@@ -48,7 +48,7 @@ export const Formats: FormatList = [
 		]
 	},
 	{
-		name: "[Pokebedrock] Anything Goes [Rated]",
+		name: "[PokeBedrock] Anything Goes [Rated]",
 		mod: "gen9",
 		gameType: "singles",
 		ruleset: [
@@ -61,7 +61,7 @@ export const Formats: FormatList = [
 		]
 	},
 	{
-		name: "[Pokebedrock] Uber [Rated]",
+		name: "[PokeBedrock] Uber [Rated]",
 		mod: 'gen9',
 		gameType: "singles",
 		ruleset: [
