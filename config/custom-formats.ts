@@ -54,11 +54,9 @@ export const Formats: FormatList = [
 		ruleset: [
 			"Obtainable",
 			"Endless Battle Clause",
-			"Picked Team Size = 6"
+			"Picked Team Size = 6",
+			"Mega Rayquaza Clause"
 		],
-		banlist: [
-			"Rayquaza-Mega",
-		]
 	},
 	{
 		name: "[PokeBedrock] Uber [Rated]",
@@ -73,10 +71,8 @@ export const Formats: FormatList = [
 			"Moody Clause",
 			"Endless Battle Clause",
 			"Swagger Clause",
-			"Picked Team Size = 6"
+			"Picked Team Size = 6",
+			"Mega Rayquaza Clause"
 		],
-		banlist: [
-			"Rayquaza-Mega"
-		]
 	},
 ];
