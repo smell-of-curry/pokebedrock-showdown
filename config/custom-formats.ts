@@ -54,8 +54,6 @@ export const Formats: FormatList = [
 		ruleset: [
 			"Obtainable",
 			"Endless Battle Clause",
-			"Picked Team Size = 6",
-			"Mega Rayquaza Clause"
 		],
 	},
 	{
@@ -71,7 +69,6 @@ export const Formats: FormatList = [
 			"Moody Clause",
 			"Endless Battle Clause",
 			"Swagger Clause",
-			"Picked Team Size = 6",
 			"Mega Rayquaza Clause"
 		],
 	},
