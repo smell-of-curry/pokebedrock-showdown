@@ -89,11 +89,9 @@ export interface PokemonGoDataTable { [speciesid: IDEntry]: PokemonGoData }
  * is otherwise ignored by the learnset checker (which will actually
  * check prevos for compatibility).
  */
-export type MoveSource = `${
-	1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
-}${
-	'M' | 'T' | 'L' | 'R' | 'E' | 'D' | 'S' | 'V' | 'C'
-}${string}`;
+export type MoveSource = `${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+	}${'M' | 'T' | 'L' | 'R' | 'E' | 'D' | 'S' | 'V' | 'C'
+	}${string}`;
 
 export class Species extends BasicEffect implements Readonly<BasicEffect & SpeciesFormatsData> {
 	declare readonly effectType: 'Pokemon';
@@ -183,6 +181,7 @@ export class Species extends BasicEffect implements Readonly<BasicEffect & Speci
 		| 'levelShed'
 		// @pokebedrock
 		| 'steps'
+		| 'nickName'
 		| 'other';
 	/**
 	 * The evolving Pokémon species must know a move with this type during the evolution trigger event
@@ -243,6 +242,11 @@ export class Species extends BasicEffect implements Readonly<BasicEffect & Speci
 	 */
 	readonly evoPartyType?: string;
 	/**
+	 * At least one pokemon with these forms must be present in party for evolution, listed in ID form.
+	 * @pokebedrock
+	*/
+	readonly evoPartyForms?: string[];
+	/**
 	 * The required relation between the Pokémon's Attack and Defense stats.
 	 * 1 means Attack > Defense. 0 means Attack = Defense. -1 means Attack < Defense
 	 * @pokebedrock
@@ -281,6 +285,11 @@ export class Species extends BasicEffect implements Readonly<BasicEffect & Speci
 	* @pokebedrock
 	*/
 	readonly evoMoonPhase?: keyof typeof MoonPhase;
+	/**
+	 * Nickname Required for the evolution.
+	 * @pokebedrock
+	 */
+	readonly evoNickname?: string;
 	/**
 	* Cosmetic Forme Required for the evolution.
 	* @pokebedrock
@@ -424,8 +433,8 @@ export class Species extends BasicEffect implements Readonly<BasicEffect & Speci
 		this.gender = data.gender || '';
 		this.genderRatio = data.genderRatio || (this.gender === 'M' ? { M: 1, F: 0 } :
 			this.gender === 'F' ? { M: 0, F: 1 } :
-			this.gender === 'N' ? { M: 0, F: 0 } :
-			{ M: 0.5, F: 0.5 });
+				this.gender === 'N' ? { M: 0, F: 0 } :
+					{ M: 0.5, F: 0.5 });
 		this.requiredItem = data.requiredItem || undefined;
 		this.requiredItems = data.requiredItems || (this.requiredItem ? [this.requiredItem] : undefined);
 		this.baseStats = data.baseStats || { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 };
