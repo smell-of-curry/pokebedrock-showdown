@@ -184,6 +184,8 @@ export class Species extends BasicEffect implements Readonly<BasicEffect & Speci
 		'levelShed' |
 		// @pokebedrock
 		'steps' |
+		// @pokebedrock
+		'nickName' |
 		'other';
 	/**
 	 * The evolving Pokémon species must know a move with this type during the evolution trigger event
@@ -244,6 +246,11 @@ export class Species extends BasicEffect implements Readonly<BasicEffect & Speci
 	 */
 	readonly evoPartyType?: string;
 	/**
+	 * At least one pokemon with these forms must be present in party for evolution, listed in ID form.
+	 * @pokebedrock
+	*/
+	readonly evoPartyForms?: string[];
+	/**
 	 * The required relation between the Pokémon's Attack and Defense stats.
 	 * 1 means Attack > Defense. 0 means Attack = Defense. -1 means Attack < Defense
 	 * @pokebedrock
@@ -287,6 +294,11 @@ export class Species extends BasicEffect implements Readonly<BasicEffect & Speci
 	* @pokebedrock
 	*/
 	readonly evoCosmeticForme?: string;
+	/**
+	 * Nickname Required for the evolution.
+	 * @pokebedrock
+	 */
+	readonly evoNickname?: string;
 	/** Is NFE? True if this Pokemon can evolve (Mega evolution doesn't count). */
 	readonly nfe: boolean;
 	/** Egg groups. */
