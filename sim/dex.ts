@@ -202,22 +202,24 @@ export class ModdedDex {
 	mod(mod: string | undefined): ModdedDex {
 		if (!dexes['base'].modsLoaded) dexes['base'].includeMods();
 		const modId = mod || 'base';
-		// @pokebedrock - lazily create ModdedDex for mods not pre-registered
-		if (!dexes[modId]) dexes[modId] = new ModdedDex(modId);
+		// Fallback to base data for unsupported/unregistered mods
+		if (!dexes[modId]) return dexes[BASE_MOD].includeData();
 		return dexes[modId].includeData();
 	}
 
 	forGen(gen: number) {
 		if (!gen) return this;
-		return this.mod(`gen${gen}`);
+		// Only Gen 9 (base) is supported; fallback for older gens
+		if (gen >= 9) return this.mod(`gen${gen}`);
+		return dexes[BASE_MOD].includeData();
 	}
 
 	forFormat(format: Format | string): ModdedDex {
 		if (!this.modsLoaded) this.includeMods();
 		const mod = this.formats.get(format).mod;
 		const modId = mod || BASE_MOD;
-		// @pokebedrock - lazily create ModdedDex for mods not pre-registered
-		if (!dexes[modId]) dexes[modId] = new ModdedDex(modId);
+		// Fallback to base data for unsupported/unregistered mods
+		if (!dexes[modId]) return dexes[BASE_MOD].includeData();
 		return dexes[modId].includeData();
 	}
 

@@ -1,6 +1,3 @@
-// @pokebedrock - minimal static map for random battles modules we support
-export const RandomBattlesMods: string[] = ['gen9'];
-
 export const getRandomBattlesModule = (mod: string): { default: any } | undefined => {
 	switch (mod) {
 	case 'gen9':

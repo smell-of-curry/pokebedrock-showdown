@@ -624,11 +624,9 @@ export class DexFormats {
 			if (format.bestOfDefault === undefined) format.bestOfDefault = false;
 			if (format.teraPreviewDefault === undefined) format.teraPreviewDefault = false;
 			if (format.mod === undefined) format.mod = 'gen9';
-			// Fail fast if a format requires a mod that is not registered
-			// (only pre-registered mods are supported; others should not silently load)
-			if (!this.dex.dexes[format.mod]) {
-				throw new Error(`Format requires nonexistent mod: ${format.mod}`);
-			}
+			// If a format requires a mod that is not registered, fall back to default
+			// This prevents startup crashes when legacy gens are present in formats list
+			if (!this.dex.dexes[format.mod]) format.mod = DEFAULT_MOD;
 
 			const ruleset = new Format(format);
 			this.rulesetCache.set(id, ruleset);
