@@ -1,6 +1,12 @@
-// @pokebedrock - random battles not used, stub to avoid bundling all gen team generators
-export const RandomBattlesMods: string[] = [];
+// @pokebedrock - minimal static map for random battles modules we support
+export const RandomBattlesMods: string[] = ['gen9'];
 
-export const getRandomBattlesModule = (_module: string): {default: any} | undefined => {
-	return undefined;
+export const getRandomBattlesModule = (mod: string): { default: any } | undefined => {
+	switch (mod) {
+	case 'gen9':
+		// Standard Gen 9 Random Battles (singles/doubles variants are handled internally)
+		return require('../data/random-battles/gen9/teams');
+	default:
+		return undefined;
+	}
 };
