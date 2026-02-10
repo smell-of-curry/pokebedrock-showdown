@@ -487,9 +487,9 @@ export class ModdedDex {
 			const filePath = basePath + DATA_FILES[dataType];
 			// @pokebedrock - use inline data registry to avoid dynamic requires
 			const dataObject = DataRegistry[filePath];
-			// @pokebedrock - Return empty for any mod whose data isn't in the registry
-			// (mods will gracefully inherit from their parent instead)
-			if (!dataObject && basePath.includes('mods/')) return;
+			// @pokebedrock - Only allow silent fallback for the pokebedrock mod
+			// Other mods must be explicitly registered; otherwise, error out
+			if (!dataObject && basePath.includes('mods/pokebedrock')) return;
 			if (!dataObject || typeof dataObject !== 'object') {
 				throw new TypeError(`${filePath}, if it exists, must export a non-null object`);
 			}
