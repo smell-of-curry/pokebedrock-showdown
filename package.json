@@ -1,7 +1,7 @@
 {
   "name": "pokebedrock-showdown",
   "description": "A modified version of the Pokémon Showdown server, designed for PokeBedrock.",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "main": "dist/sim/index.js",
   "types": "dist/sim/index.d.ts",
   "dependencies": {
