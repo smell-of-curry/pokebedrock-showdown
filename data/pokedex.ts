@@ -5404,7 +5404,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		eggGroups: ["Human-Like", "Amorphous"],
 		otherFormes: ["Gardevoir-Mega"],
 		formeOrder: ["Gardevoir", "Gardevoir-Mega"],
-		cosmeticFormes: ["Gardevoir-Christmas"],
+		cosmeticFormes: ["Gardevoir-Christmas", "Gardevoir-PBRanni"],
 	},
 	gardevoirmega: {
 		num: 282,
@@ -5419,6 +5419,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		color: "White",
 		eggGroups: ["Amorphous"],
 		requiredItem: "Gardevoirite",
+		cosmeticFormes: ["Gardevoir-Mega-PBRanni"],
 	},
 	surskit: {
 		num: 283,
@@ -7060,6 +7061,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		eggGroups: ["Undiscovered"],
 		otherFormes: ["Rayquaza-Mega"],
 		formeOrder: ["Rayquaza", "Rayquaza-Mega"],
+		cosmeticFormes: ["Rayquaza-PBRanni"],
 	},
 	rayquazamega: {
 		num: 384,
@@ -7075,6 +7077,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		color: "Green",
 		eggGroups: ["Undiscovered"],
 		requiredMove: "Dragon Ascent",
+		cosmeticFormes: ["Rayquaza-Mega-PBRanni"],
 	},
 	jirachi: {
 		num: 385,
@@ -11595,6 +11598,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		tags: ["Mythical"],
 		otherFormes: ["Keldeo-Resolute"],
 		formeOrder: ["Keldeo", "Keldeo-Resolute"],
+		cosmeticFormes: ["Keldeo-PBRanni"],
 	},
 	keldeoresolute: {
 		num: 647,
@@ -12249,6 +12253,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		weightkg: 0.9,
 		color: "White",
 		eggGroups: ["Undiscovered"],
+		cosmeticFormes: ["Floette-Eternal-PBRanni"],
 	},
 	florges: {
 		num: 671,
@@ -16602,6 +16607,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		prevo: "Drakloak",
 		evoLevel: 60,
 		eggGroups: ["Amorphous", "Dragon"],
+		cosmeticFormes: ["Dragapult-PBRanni"],
 	},
 	zacian: {
 		num: 888,
@@ -17554,6 +17560,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		prevo: "Naclstack",
 		evoLevel: 38,
 		eggGroups: ["Mineral"],
+		cosmeticFormes: ["Garganacl-PBRanni"],
 	},
 	charcadet: {
 		num: 935,
