@@ -1483,8 +1483,12 @@ export class Pokemon {
 				// Shaymin-Sky -> Shaymin
 				this.battle.add('-formechange', this, species.name, message);
 			}
-			// @pokebedrock - Send Details changed after, so mega effect can look good.
-			this.battle.add('detailschange', this, details);
+			// @pokebedrock - Include source & details for custom effects (e.g. crit evolution, and mega evolutions)
+			if (source && !['Item', 'Status', 'Ability', 'Weather', 'Terrain'].includes(source.effectType)) {
+				this.battle.add('detailschange', this, details, `[from] ${source.id}`);
+			} else {
+				this.battle.add('detailschange', this, details);
+			}
 		} else {
 			if (source?.effectType === 'Ability') {
 				this.battle.add('-formechange', this, species.name, message, `[from] ability: ${source.name}`);
