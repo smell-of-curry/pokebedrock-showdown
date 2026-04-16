@@ -193,6 +193,9 @@ export class BattleStream extends Streams.ObjectReadWriteStream<string> {
 						null;
 
 					battlePokemon.formeChange(speciesName, sourceEffect, true);
+					// @pokebedrock - Update identity for true evolutions so protocol messages use the new name
+					(battlePokemon as any).name = speciesName;
+					(battlePokemon as any).fullname = `${battlePokemon.side.id}: ${speciesName}`;
 					this.battle!.sendUpdates();
 				} catch (err: any) {
 					console.warn('Error in forceforme: ' + err.message);
