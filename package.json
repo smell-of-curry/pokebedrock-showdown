@@ -1,7 +1,7 @@
 {
   "name": "pokebedrock-showdown",
   "description": "A modified version of the Pokémon Showdown server, designed for PokeBedrock.",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "main": "dist/sim/index.js",
   "types": "dist/sim/index.d.ts",
   "dependencies": {
@@ -17,7 +17,7 @@
     "better-sqlite3": "^11.10.0",
     "cloud-env": "^0.2.3",
     "githubhook": "^1.9.3",
-    "nodemailer": "^7.0.5",
+    "nodemailer": "^8.0.5",
     "permessage-deflate": "^0.1.7",
     "pg": "^8.16.3",
     "probe-image-size": "^7.2.3",
@@ -28,6 +28,12 @@
   },
   "secretDependencies": {
     "node-oom-heapdump": "^1.2.0"
+  },
+  "overrides": {
+    "tar": "^7.5.13",
+    "@tootallnate/once": "^3.0.1",
+    "serialize-javascript": "^7.0.5",
+    "diff": "^8.0.3"
   },
   "engines": {
     "node": ">=16.0.0"
