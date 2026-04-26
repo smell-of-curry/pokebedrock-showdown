@@ -14,11 +14,13 @@ import { Battle } from '../battle';
 import * as BattleStreams from '../battle-stream';
 import { State } from '../state';
 import { PRNG, type PRNGSeed } from '../prng';
-import { RandomPlayerAI } from './random-player-ai';
+import { PlayerAI } from './player-ai';
 
 export interface AIOptions {
-	createAI: (stream: ObjectReadWriteStream<string>, options: AIOptions) => RandomPlayerAI;
+	createAI: (stream: ObjectReadWriteStream<string>, options: AIOptions) => BattleStreams.BattlePlayer;
+	/** Probability the random engine picks a move over a switch. */
 	move?: number;
+	/** Probability the random engine attempts Mega/Ultra/Dyna/Tera. */
 	mega?: number;
 	seed?: PRNG | PRNGSeed | null;
 	team?: PokemonSet[];
@@ -39,7 +41,12 @@ export interface RunnerOptions {
 
 export class Runner {
 	static readonly AI_OPTIONS: AIOptions = {
-		createAI: (s: ObjectReadWriteStream<string>, o: AIOptions) => new RandomPlayerAI(s, o),
+		createAI: (s: ObjectReadWriteStream<string>, o: AIOptions) => new PlayerAI(s, {
+			engine: 'random',
+			seed: o.seed,
+			randomMoveProb: o.move,
+			randomMegaProb: o.mega,
+		}),
 		move: 0.7,
 		mega: 0.6,
 	};
@@ -101,7 +108,7 @@ export class Runner {
 		const p2 = this.p2options.createAI(
 			streams.p2, { seed: this.newSeed(), ...this.p2options }
 		);
-		let p3: RandomPlayerAI, p4: RandomPlayerAI;
+		let p3: BattleStreams.BattlePlayer, p4: BattleStreams.BattlePlayer;
 		if (is4P) {
 			p3 = this.p4options.createAI(
 				streams.p3, { seed: this.newSeed(), ...this.p3options }

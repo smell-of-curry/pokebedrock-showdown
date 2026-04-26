@@ -425,7 +425,12 @@ export abstract class BattlePlayer {
 		this.log.push(line);
 	}
 
-	abstract receiveRequest(request: ChoiceRequest): void;
+	// Implementations may either drive the choice imperatively (returning
+	// `void` after calling `this.choose`) or return the choice string for
+	// the caller to dispatch (as `PlayerAI` does so its embedding host
+	// can decide when to send the command). Returning `undefined`/`""`
+	// indicates "no choice to send" (e.g. for `wait` requests).
+	abstract receiveRequest(request: ChoiceRequest): string | undefined | void;
 
 	receiveError(error: Error) {
 		throw error;

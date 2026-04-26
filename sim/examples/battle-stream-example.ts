@@ -10,7 +10,7 @@
  */
 
 import { BattleStream, getPlayerStreams, Teams } from '..';
-import { RandomPlayerAI } from '../tools/random-player-ai';
+import { PlayerAI } from '../tools/player-ai';
 
 /*********************************************************************
  * Run AI
@@ -30,8 +30,8 @@ const p2spec = {
 	team: Teams.pack(Teams.generate('gen7randombattle')),
 };
 
-const p1 = new RandomPlayerAI(streams.p1);
-const p2 = new RandomPlayerAI(streams.p2);
+const p1 = new PlayerAI(streams.p1, { engine: "random" });
+const p2 = new PlayerAI(streams.p2, { engine: "random" });
 
 console.log("p1 is " + p1.constructor.name);
 console.log("p2 is " + p2.constructor.name);

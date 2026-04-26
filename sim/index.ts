@@ -15,8 +15,7 @@ export { BattleStream, BattlePlayer, getPlayerStreams } from './battle-stream';
 export { Pokemon } from './pokemon';
 export { PRNG, PRNGSeed } from './prng';
 export { Side, ChoiceRequest, PokemonSwitchRequestData } from './side';
-export { RandomPlayerAI } from './tools/random-player-ai';
-export { StrongHeuristicsAI } from './tools/strategic-player-ai';
+export { PlayerAI, type PlayerAIOptions } from './tools/player-ai';
 
 // dex API
 

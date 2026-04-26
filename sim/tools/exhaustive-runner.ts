@@ -8,7 +8,14 @@
 import type { ObjectReadWriteStream } from '../../lib/streams';
 import { Dex, toID } from '../dex';
 import { PRNG, type PRNGSeed } from '../prng';
-import { RandomPlayerAI } from './random-player-ai';
+import {
+	RandomEngine,
+	type RandomMoveOption,
+	type RandomSwitchOption,
+} from './strategic-ai/engines/RandomEngine';
+import type { EngineContext } from './strategic-ai/engines/Engine';
+import type { PokemonSwitchRequestData } from '../side';
+import { PlayerAI } from './player-ai';
 import { type AIOptions, Runner } from './runner';
 
 interface Pools {
@@ -74,7 +81,13 @@ export class ExhaustiveRunner {
 
 		const seed = this.prng.getSeed();
 		const pools = this.createPools(dex);
-		const createAI = (s: ObjectReadWriteStream<string>, o: AIOptions) => new CoordinatedPlayerAI(s, o, pools);
+		const createAI = (s: ObjectReadWriteStream<string>, o: AIOptions) => new PlayerAI(s, {
+			engine: 'random',
+			engineInstance: new CoordinatedRandomEngine(pools),
+			seed: o.seed,
+			randomMoveProb: o.move,
+			randomMegaProb: o.mega,
+		});
 		const generator = new TeamGenerator(dex, this.prng, pools, ExhaustiveRunner.getSignatures(dex, pools));
 
 		do {
@@ -392,80 +405,79 @@ class Pool {
 	}
 }
 
-// Random AI which shares Pools with the TeamGenerator to coordinate creating battle simulations
-// that test out as many different Pokemon/Species/Items/Moves as possible. The logic is still
-// random, so it's not going to optimally use as many new effects as would be possible, but it
-// should exhaust its pools much faster than the naive RandomPlayerAI alone.
+// Random engine which shares Pools with the TeamGenerator to coordinate creating battle
+// simulations that test out as many different Pokemon/Species/Items/Moves as possible. The
+// logic is still random, so it's not going to optimally use as many new effects as would be
+// possible, but it should exhaust its pools much faster than the naive RandomEngine alone.
 //
-// NOTE: We're tracking 'usage' when we make the choice and not what actually gets used in Battle.
-// These can differ in edge cases and so its possible we report that we've 'used' every option
-// when we haven't (for example, we may switch in a Pokemon with an ability, but we're not
-// guaranteeing the ability activates, etc).
-class CoordinatedPlayerAI extends RandomPlayerAI {
+// NOTE: We're tracking 'usage' when we make the choice and not what actually gets used in
+// Battle. These can differ in edge cases and so its possible we report that we've 'used'
+// every option when we haven't (for example, we may switch in a Pokemon with an ability, but
+// we're not guaranteeing the ability activates, etc).
+class CoordinatedRandomEngine extends RandomEngine {
 	private readonly pools: Pools;
 
-	constructor(playerStream: ObjectReadWriteStream<string>, options: AIOptions, pools: Pools) {
-		super(playerStream, options);
+	constructor(pools: Pools) {
+		super();
 		this.pools = pools;
 	}
 
-	protected override chooseTeamPreview(team: AnyObject[]): string {
-		return `team ${this.choosePokemon(team.map((p, i) => ({ slot: i + 1, pokemon: p }))) || 1}`;
-	}
-
-	protected override chooseMove(active: AnyObject, moves: { choice: string, move: AnyObject }[]): string {
-		this.markUsedIfGmax(active);
+	protected override pickMoveOption(options: RandomMoveOption[], ctx: EngineContext): string {
 		// Prefer to use a move which hasn't been used yet.
-		for (const { choice, move } of moves) {
-			const id = this.fixMove(move);
+		for (const opt of options) {
+			const id = fixMoveId(opt.move);
 			if (!this.pools.moves.wasUsed(id)) {
 				this.pools.moves.markUsed(id);
-				return choice;
+				return opt.choice;
 			}
 		}
-		return super.chooseMove(active, moves);
+		return super.pickMoveOption(options, ctx);
 	}
 
-	protected override chooseSwitch(
-		active: AnyObject | undefined, switches: { slot: number, pokemon: AnyObject }[]
+	protected override pickSwitchSlot(options: RandomSwitchOption[], ctx: EngineContext): number {
+		const preferred = this.preferredSlot(options);
+		return preferred || super.pickSwitchSlot(options, ctx);
+	}
+
+	protected override pickTeamSlot(
+		options: { slot: number, pokemon: PokemonSwitchRequestData }[],
+		ctx: EngineContext
 	): number {
-		this.markUsedIfGmax(active);
-		return this.choosePokemon(switches) || super.chooseSwitch(active, switches);
+		const preferred = this.preferredSlot(options);
+		return preferred || super.pickTeamSlot(options, ctx);
 	}
 
-	private choosePokemon(choices: { slot: number, pokemon: AnyObject }[]) {
-		// Prefer to choose a Pokemon that has a species/ability/item/move we haven't seen yet.
+	// Prefer a slot that exposes a species/ability/item/move we haven't seen yet.
+	private preferredSlot(choices: { slot: number, pokemon: PokemonSwitchRequestData }[]): number {
 		for (const { slot, pokemon } of choices) {
-			const species = toID(pokemon.details.split(',')[0]);
+			const details = (pokemon as AnyObject).details ?? '';
+			const species = toID(String(details).split(',')[0]);
+			const baseAbility = (pokemon as AnyObject).baseAbility;
+			const item = (pokemon as AnyObject).item;
+			const moves = ((pokemon as AnyObject).moves ?? []) as AnyObject[];
 			if (
 				!this.pools.pokemon.wasUsed(species) ||
-				!this.pools.abilities.wasUsed(pokemon.baseAbility) ||
-				!this.pools.items.wasUsed(pokemon.item) ||
-				pokemon.moves.some((m: AnyObject) => !this.pools.moves.wasUsed(this.fixMove(m)))
+				(baseAbility && !this.pools.abilities.wasUsed(baseAbility)) ||
+				(item && !this.pools.items.wasUsed(item)) ||
+				moves.some((m: AnyObject) => !this.pools.moves.wasUsed(fixMoveId(m)))
 			) {
 				this.pools.pokemon.markUsed(species);
-				this.pools.abilities.markUsed(pokemon.baseAbility);
-				this.pools.items.markUsed(pokemon.item);
+				if (baseAbility) this.pools.abilities.markUsed(baseAbility);
+				if (item) this.pools.items.markUsed(item);
 				return slot;
 			}
 		}
+		return 0;
 	}
+}
 
-	// The move options provided by the simulator have been converted from the name
-	// which we're tracking, so we need to convert them back.
-	private fixMove(m: AnyObject) {
-		const id = toID(m.move);
-		if (id.startsWith('return')) return 'return';
-		if (id.startsWith('frustration')) return 'frustration';
-		if (id.startsWith('hiddenpower')) return 'hiddenpower';
-		return id;
-	}
-
-	// Gigantamax Pokemon need to be special cased for tracking because the current
-	// tracking only works if you can switch in a Pokemon.
-	private markUsedIfGmax(active: AnyObject | undefined) {
-		if (active && !active.canDynamax && active.maxMoves?.gigantamax) {
-			this.pools.pokemon.markUsed(toID(active.maxMoves.gigantamax));
-		}
-	}
+// The move options provided by the simulator have been converted from the name
+// which we're tracking, so we need to convert them back.
+function fixMoveId(m: string | AnyObject): string {
+	const raw = typeof m === 'string' ? m : (m.move ?? m.id ?? m.name ?? '');
+	const id = toID(raw);
+	if (id.startsWith('return')) return 'return';
+	if (id.startsWith('frustration')) return 'frustration';
+	if (id.startsWith('hiddenpower')) return 'hiddenpower';
+	return id;
 }
