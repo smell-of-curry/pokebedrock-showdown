@@ -485,25 +485,19 @@ export class ModdedDex {
 	}
 
 	loadDataFile(basePath: string, dataType: DataType): AnyObject | void {
-		try {
-			const filePath = basePath + DATA_FILES[dataType];
-			// @pokebedrock - use inline data registry to avoid dynamic requires
-			const dataObject = DataRegistry[filePath];
-			// @pokebedrock - Only allow silent fallback for the pokebedrock mod
-			// Other mods must be explicitly registered; otherwise, error out
-			if (!dataObject && basePath.includes('mods/pokebedrock')) return;
-			if (!dataObject || typeof dataObject !== 'object') {
-				throw new TypeError(`${filePath}, if it exists, must export a non-null object`);
-			}
-			if (dataObject[dataType]?.constructor?.name !== 'Object') {
-				throw new TypeError(`${filePath}, if it exists, must export an object whose '${dataType}' property is an Object`);
-			}
-			return dataObject[dataType];
-		} catch (e: any) {
-			if (e.code !== 'MODULE_NOT_FOUND' && e.code !== 'ENOENT') {
-				throw e;
-			}
+		const filePath = basePath + DATA_FILES[dataType];
+		// @pokebedrock - use inline data registry to avoid dynamic requires
+		const dataObject = DataRegistry[filePath];
+		// @pokebedrock - Only allow silent fallback for the pokebedrock mod
+		// Other mods must be explicitly registered; otherwise, error out
+		if (!dataObject && basePath.includes('mods/pokebedrock')) return;
+		if (!dataObject || typeof dataObject !== 'object') {
+			throw new TypeError(`${filePath}, if it exists, must export a non-null object`);
 		}
+		if (dataObject[dataType]?.constructor?.name !== 'Object') {
+			throw new TypeError(`${filePath}, if it exists, must export an object whose '${dataType}' property is an Object`);
+		}
+		return dataObject[dataType];
 	}
 
 	loadTextFile(

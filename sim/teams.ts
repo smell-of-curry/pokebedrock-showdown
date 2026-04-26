@@ -708,7 +708,8 @@ export const Teams = new class Teams {
 		} else if (formatID.includes('gen9freeforallrandombattle')) {
 			TeamGenerator = require(`../data/random-battles/gen9ffa/teams`).default;
 		} else {
-			// @pokebedrock - use generated static module map to avoid dynamic requires
+			// @pokebedrock - use static module map to avoid dynamic requires;
+			// only `gen9` is registered, so non-gen9 random formats throw here.
 			const rbModule = getRandomBattlesModule(mod);
 			if (!rbModule) throw new Error(`Random battles module not found for mod: ${mod}`);
 			TeamGenerator = rbModule.default;
