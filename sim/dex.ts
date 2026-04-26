@@ -36,8 +36,41 @@ import { Format, DexFormats } from './dex-formats';
 import { Utils } from '../lib/utils';
 import { Aliases, CompoundWordNames } from '../data/aliases';
 
-// @pokebedrock - use generated static module map to avoid dynamic requires
-import { DexMods, DexModuleMap } from './dex-module-map';
+// @pokebedrock - static imports for base data (replaces dex-module-map.ts)
+import * as DataAbilities from '../data/abilities';
+import * as DataRulesets from '../data/rulesets';
+import * as DataFormatsData from '../data/formats-data';
+import * as DataItems from '../data/items';
+import * as DataLearnsets from '../data/learnsets';
+import * as DataMoves from '../data/moves';
+import * as DataNatures from '../data/natures';
+import * as DataPokedex from '../data/pokedex';
+import * as DataPokemonGo from '../data/pokemongo';
+import * as DataScripts from '../data/scripts';
+import * as DataConditions from '../data/conditions';
+import * as DataTypeChart from '../data/typechart';
+
+// @pokebedrock - static imports for pokebedrock mod
+import * as ModPBPokedex from '../data/mods/pokebedrock/pokedex';
+import * as ModPBScripts from '../data/mods/pokebedrock/scripts';
+
+// @pokebedrock - minimal data registry (base + pokebedrock mod only)
+const DataRegistry: Record<string, any> = {
+	'../data/abilities': DataAbilities,
+	'../data/rulesets': DataRulesets,
+	'../data/formats-data': DataFormatsData,
+	'../data/items': DataItems,
+	'../data/learnsets': DataLearnsets,
+	'../data/moves': DataMoves,
+	'../data/natures': DataNatures,
+	'../data/pokedex': DataPokedex,
+	'../data/pokemongo': DataPokemonGo,
+	'../data/scripts': DataScripts,
+	'../data/conditions': DataConditions,
+	'../data/typechart': DataTypeChart,
+	'../data/mods/pokebedrock/pokedex': ModPBPokedex,
+	'../data/mods/pokebedrock/scripts': ModPBScripts,
+};
 
 const BASE_MOD = 'gen9' as ID;
 
@@ -168,20 +201,26 @@ export class ModdedDex {
 
 	mod(mod: string | undefined): ModdedDex {
 		if (!dexes['base'].modsLoaded) dexes['base'].includeMods();
-		return dexes[mod || 'base'].includeData();
+		const modId = mod || 'base';
+		// Fallback to base data for unsupported/unregistered mods
+		if (!dexes[modId]) return dexes[BASE_MOD].includeData();
+		return dexes[modId].includeData();
 	}
 
 	forGen(gen: number) {
 		if (!gen) return this;
-		return this.mod(`gen${gen}`);
+		// Only Gen 9 (base) is supported; fallback for older gens
+		if (gen >= 9) return this.mod(`gen${gen}`);
+		return dexes[BASE_MOD].includeData();
 	}
 
 	forFormat(format: Format | string): ModdedDex {
 		if (!this.modsLoaded) this.includeMods();
 		const mod = this.formats.get(format).mod;
-		const moddedDex = dexes[mod || BASE_MOD];
-		if (!moddedDex) throw new Error(`ModdedDex ${mod || BASE_MOD} not found`);
-		return moddedDex.includeData();
+		const modId = mod || BASE_MOD;
+		// Fallback to base data for unsupported/unregistered mods
+		if (!dexes[modId]) return dexes[BASE_MOD].includeData();
+		return dexes[modId].includeData();
 	}
 
 	modData(dataType: DataType, id: string) {
@@ -446,24 +485,19 @@ export class ModdedDex {
 	}
 
 	loadDataFile(basePath: string, dataType: DataType): AnyObject | void {
-		try {
-			const filePath = basePath + DATA_FILES[dataType];
-			// @pokebedrock - use generated static import map to avoid dynamic requires
-			const dataObject = DexModuleMap[filePath];
-			// @pokebedrock - Return empty for non-specified 'pokebedrock' mods
-			if (!dataObject && basePath.includes('mods/pokebedrock')) return;
-			if (!dataObject || typeof dataObject !== 'object') {
-				throw new TypeError(`${filePath}, if it exists, must export a non-null object`);
-			}
-			if (dataObject[dataType]?.constructor?.name !== 'Object') {
-				throw new TypeError(`${filePath}, if it exists, must export an object whose '${dataType}' property is an Object`);
-			}
-			return dataObject[dataType];
-		} catch (e: any) {
-			if (e.code !== 'MODULE_NOT_FOUND' && e.code !== 'ENOENT') {
-				throw e;
-			}
+		const filePath = basePath + DATA_FILES[dataType];
+		// @pokebedrock - use inline data registry to avoid dynamic requires
+		const dataObject = DataRegistry[filePath];
+		// @pokebedrock - Only allow silent fallback for the pokebedrock mod
+		// Other mods must be explicitly registered; otherwise, error out
+		if (!dataObject && basePath.includes('mods/pokebedrock')) return;
+		if (!dataObject || typeof dataObject !== 'object') {
+			throw new TypeError(`${filePath}, if it exists, must export a non-null object`);
 		}
+		if (dataObject[dataType]?.constructor?.name !== 'Object') {
+			throw new TypeError(`${filePath}, if it exists, must export an object whose '${dataType}' property is an Object`);
+		}
+		return dataObject[dataType];
 	}
 
 	loadTextFile(
@@ -497,10 +531,8 @@ export class ModdedDex {
 		if (!this.isBase) throw new Error(`This must be called on the base Dex`);
 		if (this.modsLoaded) return this;
 
-		// @pokebedrock - use generated mods map to fs reading
-		for (const mod of DexMods) {
-			dexes[mod] = new ModdedDex(mod);
-		}
+		// @pokebedrock - only the pokebedrock mod is needed
+		dexes['pokebedrock'] = new ModdedDex('pokebedrock');
 		this.modsLoaded = true;
 
 		return this;
