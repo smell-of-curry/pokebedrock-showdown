@@ -239,14 +239,14 @@ export class Side {
 		}
 
 		switch (this.battle.gameType) {
-		case 'doubles':
-			this.active = [null!, null!];
-			break;
-		case 'triples': case 'rotation':
-			this.active = [null!, null!, null!];
-			break;
-		default:
-			this.active = [null!];
+			case 'doubles':
+				this.active = [null!, null!];
+				break;
+			case 'triples': case 'rotation':
+				this.active = [null!, null!, null!];
+				break;
+			default:
+				this.active = [null!];
 		}
 
 		this.pokemonLeft = this.pokemon.length;
@@ -318,24 +318,24 @@ export class Side {
 		}
 		return this.choice.actions.map(action => {
 			switch (action.choice) {
-			case 'move':
-				let details = ``;
-				if (action.targetLoc && this.active.length > 1) details += ` ${action.targetLoc > 0 ? '+' : ''}${action.targetLoc}`;
-				if (action.mega) details += (action.pokemon!.item === 'ultranecroziumz' ? ` ultra` : ` mega`);
-				if (action.megax) details += ` megax`;
-				if (action.megay) details += ` megay`;
-				if (action.zmove) details += ` zmove`;
-				if (action.maxMove) details += ` dynamax`;
-				if (action.terastallize) details += ` terastallize`;
-				return `move ${action.moveid}${details}`;
-			case 'switch':
-			case 'instaswitch':
-			case 'revivalblessing':
-				return `switch ${action.target!.position + 1}`;
-			case 'team':
-				return `team ${action.pokemon!.position + 1}`;
-			default:
-				return action.choice;
+				case 'move':
+					let details = ``;
+					if (action.targetLoc && this.active.length > 1) details += ` ${action.targetLoc > 0 ? '+' : ''}${action.targetLoc}`;
+					if (action.mega) details += (action.pokemon!.item === 'ultranecroziumz' ? ` ultra` : ` mega`);
+					if (action.megax) details += ` megax`;
+					if (action.megay) details += ` megay`;
+					if (action.zmove) details += ` zmove`;
+					if (action.maxMove) details += ` dynamax`;
+					if (action.terastallize) details += ` terastallize`;
+					return `move ${action.moveid}${details}`;
+				case 'switch':
+				case 'instaswitch':
+				case 'revivalblessing':
+					return `switch ${action.target!.position + 1}`;
+				case 'team':
+					return `team ${action.pokemon!.position + 1}`;
+				default:
+					return action.choice;
 			}
 		}).join(', ');
 	}
@@ -440,18 +440,18 @@ export class Side {
 	}
 
 	getSideCondition(status: string | Effect): Effect | null {
-		status = this.battle.dex.conditions.get(status) as Effect;
+		status = this.battle.dex.conditions.get(status);
 		if (!this.sideConditions[status.id]) return null;
 		return status;
 	}
 
 	getSideConditionData(status: string | Effect): AnyObject {
-		status = this.battle.dex.conditions.get(status) as Effect;
+		status = this.battle.dex.conditions.get(status);
 		return this.sideConditions[status.id] || null;
 	}
 
 	removeSideCondition(status: string | Effect): boolean {
-		status = this.battle.dex.conditions.get(status) as Effect;
+		status = this.battle.dex.conditions.get(status);
 		if (!this.sideConditions[status.id]) return false;
 		this.battle.singleEvent('SideEnd', status, this.sideConditions[status.id], this);
 		delete this.sideConditions[status.id];
@@ -493,14 +493,14 @@ export class Side {
 
 	getSlotCondition(target: Pokemon | number, status: string | Effect) {
 		if (target instanceof Pokemon) target = target.position;
-		status = this.battle.dex.conditions.get(status) as Effect;
+		status = this.battle.dex.conditions.get(status);
 		if (!this.slotConditions[target][status.id]) return null;
 		return status;
 	}
 
 	removeSlotCondition(target: Pokemon | number, status: string | Effect) {
 		if (target instanceof Pokemon) target = target.position;
-		status = this.battle.dex.conditions.get(status) as Effect;
+		status = this.battle.dex.conditions.get(status);
 		if (!this.slotConditions[target][status.id]) return false;
 		this.battle.singleEvent('End', status, this.slotConditions[target][status.id], this.active[target]);
 		delete this.slotConditions[target][status.id];
@@ -1188,110 +1188,110 @@ export class Side {
 			}
 
 			switch (choiceType) {
-			case 'move':
-				const original = data;
-				const error = () => this.emitChoiceError(`Conflicting arguments for "move": ${original}`);
-				let targetLoc: number | undefined;
-				let event: 'mega' | 'megax' | 'megay' | 'zmove' | 'ultra' | 'dynamax' | 'terastallize' | '' = '';
-				while (true) {
+				case 'move':
+					const original = data;
+					const error = () => this.emitChoiceError(`Conflicting arguments for "move": ${original}`);
+					let targetLoc: number | undefined;
+					let event: 'mega' | 'megax' | 'megay' | 'zmove' | 'ultra' | 'dynamax' | 'terastallize' | '' = '';
+					while (true) {
 					// If data ends with a number, treat it as a target location.
 					// We need to special case 'Conversion 2' so it doesn't get
 					// confused with 'Conversion' erroneously sent with the target
 					// '2' (since Conversion targets 'self', targetLoc can't be 2).
-					if (/\s(?:-|\+)?[1-3]$/.test(data) && toID(data) !== 'conversion2') {
-						if (targetLoc !== undefined) return error();
-						targetLoc = parseInt(data.slice(-2));
-						data = data.slice(0, -2).trim();
-					} else if (data.endsWith(' mega')) {
-						if (event) return error();
-						event = 'mega';
-						data = data.slice(0, -5);
-					} else if (data.endsWith(' megax')) {
-						if (event) return error();
-						event = 'megax';
-						data = data.slice(0, -6);
-					} else if (data.endsWith(' megay')) {
-						if (event) return error();
-						event = 'megay';
-						data = data.slice(0, -6);
-					} else if (data.endsWith(' zmove')) {
-						if (event) return error();
-						event = 'zmove';
-						data = data.slice(0, -6);
-					} else if (data.endsWith(' ultra')) {
-						if (event) return error();
-						event = 'ultra';
-						data = data.slice(0, -6);
-					} else if (data.endsWith(' dynamax')) {
-						if (event) return error();
-						event = 'dynamax';
-						data = data.slice(0, -8);
-					} else if (data.endsWith(' gigantamax')) {
-						if (event) return error();
-						event = 'dynamax';
-						data = data.slice(0, -11);
-					} else if (data.endsWith(' max')) {
-						if (event) return error();
-						event = 'dynamax';
-						data = data.slice(0, -4);
-					} else if (data.endsWith(' terastal')) {
-						if (event) return error();
-						event = 'terastallize';
-						data = data.slice(0, -9);
-					} else if (data.endsWith(' terastallize')) {
-						if (event) return error();
-						event = 'terastallize';
-						data = data.slice(0, -13);
-					} else {
-						break;
+						if (/\s(?:-|\+)?[1-3]$/.test(data) && toID(data) !== 'conversion2') {
+							if (targetLoc !== undefined) return error();
+							targetLoc = parseInt(data.slice(-2));
+							data = data.slice(0, -2).trim();
+						} else if (data.endsWith(' mega')) {
+							if (event) return error();
+							event = 'mega';
+							data = data.slice(0, -5);
+						} else if (data.endsWith(' megax')) {
+							if (event) return error();
+							event = 'megax';
+							data = data.slice(0, -6);
+						} else if (data.endsWith(' megay')) {
+							if (event) return error();
+							event = 'megay';
+							data = data.slice(0, -6);
+						} else if (data.endsWith(' zmove')) {
+							if (event) return error();
+							event = 'zmove';
+							data = data.slice(0, -6);
+						} else if (data.endsWith(' ultra')) {
+							if (event) return error();
+							event = 'ultra';
+							data = data.slice(0, -6);
+						} else if (data.endsWith(' dynamax')) {
+							if (event) return error();
+							event = 'dynamax';
+							data = data.slice(0, -8);
+						} else if (data.endsWith(' gigantamax')) {
+							if (event) return error();
+							event = 'dynamax';
+							data = data.slice(0, -11);
+						} else if (data.endsWith(' max')) {
+							if (event) return error();
+							event = 'dynamax';
+							data = data.slice(0, -4);
+						} else if (data.endsWith(' terastal')) {
+							if (event) return error();
+							event = 'terastallize';
+							data = data.slice(0, -9);
+						} else if (data.endsWith(' terastallize')) {
+							if (event) return error();
+							event = 'terastallize';
+							data = data.slice(0, -13);
+						} else {
+							break;
+						}
 					}
-				}
-				if (!this.chooseMove(data, targetLoc, event)) return false;
-				break;
-			case 'switch':
-				this.chooseSwitch(data);
-				break;
-			case 'shift':
-				if (data) return this.emitChoiceError(`Unrecognized data after "shift": ${data}`);
-				if (!this.chooseShift()) return false;
-				break;
-			case 'team':
-				if (!this.chooseTeam(data)) return false;
-				break;
-			case 'pass':
-			case 'skip':
-				if (data) return this.emitChoiceError(`Unrecognized data after "pass": ${data}`);
-				if (!this.choosePass()) return false;
-				break;
-			// @pokebedrock - Add bag-item choice
-			case 'bag-item':
-				let bagTargetLoc: number | undefined = undefined;
-				const bagError = () =>
-					this.emitChoiceError(`Data does not match regrex "data": ${data}`);
-				if (/\s(?:-|\+)?[1-6]$/.test(data) && toID(data) !== 'conversion2') {
-					if (bagTargetLoc !== undefined) return bagError();
-					bagTargetLoc = parseInt(data.slice(-2));
-					data = data.slice(0, -2).trim();
-				}
-				this.processBagItem(data, bagTargetLoc);
-				this.choice.actions.push({
-					choice: 'pass',
-				} as ChosenAction);
-				break;
-			// @pokebedrock - Add used-ball choice
-			case 'used-ball':
+					if (!this.chooseMove(data, targetLoc, event)) return false;
+					break;
+				case 'switch':
+					this.chooseSwitch(data);
+					break;
+				case 'shift':
+					if (data) return this.emitChoiceError(`Unrecognized data after "shift": ${data}`);
+					if (!this.chooseShift()) return false;
+					break;
+				case 'team':
+					if (!this.chooseTeam(data)) return false;
+					break;
+				case 'pass':
+				case 'skip':
+					if (data) return this.emitChoiceError(`Unrecognized data after "pass": ${data}`);
+					if (!this.choosePass()) return false;
+					break;
+					// @pokebedrock - Add bag-item choice
+				case 'bag-item':
+					let bagTargetLoc: number | undefined = undefined;
+					const bagError = () =>
+						this.emitChoiceError(`Data does not match regrex "data": ${data}`);
+					if (/\s(?:-|\+)?[1-6]$/.test(data) && toID(data) !== 'conversion2') {
+						if (bagTargetLoc !== undefined) return bagError();
+						bagTargetLoc = parseInt(data.slice(-2));
+						data = data.slice(0, -2).trim();
+					}
+					this.processBagItem(data, bagTargetLoc);
+					this.choice.actions.push({
+						choice: 'pass',
+					} as ChosenAction);
+					break;
+					// @pokebedrock - Add used-ball choice
+				case 'used-ball':
 				// Player used a ball, but it failed. We cant use 'pass' as it would fail.
-				this.choice.actions.push({
-					choice: 'pass',
-				} as ChosenAction);
-				break;
-			case 'auto':
-			case 'default':
-				this.autoChoose();
-				break;
-			default:
-				this.emitChoiceError(`Unrecognized choice: ${choiceString}`);
-				break;
+					this.choice.actions.push({
+						choice: 'pass',
+					} as ChosenAction);
+					break;
+				case 'auto':
+				case 'default':
+					this.autoChoose();
+					break;
+				default:
+					this.emitChoiceError(`Unrecognized choice: ${choiceString}`);
+					break;
 			}
 		}
 
@@ -1303,22 +1303,30 @@ export class Side {
 
 		if (!isPass) {
 			switch (this.requestState) {
-			case 'move':
+				case 'move':
 				// auto-pass
-				while (
-					index < this.active.length &&
-					(this.active[index].fainted || this.active[index].volatiles['commanding'])
-				) {
-					this.choosePass();
-					index++;
-				}
-				break;
-			case 'switch':
-				while (index < this.active.length && !this.active[index].switchFlag) {
-					this.choosePass();
-					index++;
-				}
-				break;
+				// @pokebedrock - also auto-pass empty slots: in doubles/triples a side may
+				// have fewer pokemon than active slots, so `this.active[index]` can be null.
+					while (
+						index < this.active.length &&
+						(!this.active[index] ||
+							this.active[index].fainted ||
+							this.active[index].volatiles['commanding'])
+					) {
+						this.choosePass();
+						index++;
+					}
+					break;
+				case 'switch':
+				// @pokebedrock - also auto-pass empty slots (see comment above).
+					while (
+						index < this.active.length &&
+						(!this.active[index]?.switchFlag)
+					) {
+						this.choosePass();
+						index++;
+					}
+					break;
 			}
 		}
 
@@ -1328,24 +1336,33 @@ export class Side {
 	choosePass(): boolean | Side {
 		const index = this.getChoiceIndex(true);
 		if (index >= this.active.length) return false;
-		const pokemon: Pokemon = this.active[index];
+		// @pokebedrock - `pokemon` may be null when a side has fewer pokemon than
+		// active slots in doubles/triples; treat empty slots as a free pass.
+		const pokemon: Pokemon | null = this.active[index];
+
+		if (!pokemon) {
+			this.choice.actions.push({
+				choice: 'pass',
+			} as ChosenAction);
+			return true;
+		}
 
 		switch (this.requestState) {
-		case 'switch':
-			if (pokemon.switchFlag) { // This condition will always happen if called by Battle#choose()
-				if (!this.choice.forcedPassesLeft) {
-					return this.emitChoiceError(`Can't pass: You need to switch in a Pokémon to replace ${pokemon.name}`);
+			case 'switch':
+				if (pokemon.switchFlag) { // This condition will always happen if called by Battle#choose()
+					if (!this.choice.forcedPassesLeft) {
+						return this.emitChoiceError(`Can't pass: You need to switch in a Pokémon to replace ${pokemon.name}`);
+					}
+					this.choice.forcedPassesLeft--;
 				}
-				this.choice.forcedPassesLeft--;
-			}
-			break;
-		case 'move':
-			if (!pokemon.fainted && !pokemon.volatiles['commanding']) {
-				return this.emitChoiceError(`Can't pass: Your ${pokemon.name} must make a move (or switch)`);
-			}
-			break;
-		default:
-			return this.emitChoiceError(`Can't pass: Not a move or switch request`);
+				break;
+			case 'move':
+				if (!pokemon.fainted && !pokemon.volatiles['commanding']) {
+					return this.emitChoiceError(`Can't pass: Your ${pokemon.name} must make a move (or switch)`);
+				}
+				break;
+			default:
+				return this.emitChoiceError(`Can't pass: Not a move or switch request`);
 		}
 
 		this.choice.actions.push({
