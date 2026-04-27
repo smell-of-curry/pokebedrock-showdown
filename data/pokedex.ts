@@ -15104,6 +15104,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		weightkg: 8,
 		color: "Gray",
 		tags: ["Mythical"],
+		evos: ["Melmetal"],
 		eggGroups: ["Undiscovered"],
 	},
 	melmetal: {
