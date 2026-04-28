@@ -346,8 +346,10 @@ function simpleDamage(
 		} else bp *= move.multihit;
 	}
 	const isPhysical = move.category === "Physical";
-	let atkStat = isPhysical ? atk.stats.atk : atk.stats.spa;
-	let defStat = isPhysical ? def.stats.def : def.stats.spd;
+	// `stats` is regularly absent for foes whose set hasn't been revealed,
+	// so guard with optional chaining and a neutral default.
+	let atkStat = (isPhysical ? atk.stats?.atk : atk.stats?.spa) ?? 100;
+	let defStat = (isPhysical ? def.stats?.def : def.stats?.spd) ?? 100;
 	atkStat *= boostMul(atk.boosts[isPhysical ? "atk" : "spa"] || 0);
 	defStat *= boostMul(def.boosts[isPhysical ? "def" : "spd"] || 0);
 	const ability = (atk.ability || atk.baseAbility || "").toLowerCase();

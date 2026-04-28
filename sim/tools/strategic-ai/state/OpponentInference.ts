@@ -18,9 +18,9 @@
  *   pick those up directly via the tracker. Otherwise, we limit guesses
  *   to legal abilities (`Dex.species.get(...).abilities`).
  * - **Move-set inference:** revealed moves come from the tracker; for
- *   the rest, we sample a uniform prior over the species' learnset
- *   intersected with the format's legal moves. We never assume the
- *   foe has a move it could not legally know.
+ *   the rest, we sample a uniform prior over the species' learnset as
+ *   available in `Dex.data.Learnsets`. This module does not currently
+ *   intersect that learnset with the active format's legal move pool.
  *
  * The output is always a probability distribution over moves /
  * abilities / items, never a single guess. Search engines (one-ply,
@@ -193,18 +193,23 @@ function inferItems(tracker: BattleStateTracker, mon: TrackedPokemon): Distribut
 	avScore = 0.05;
 	sashScore = 0.05;
 
-	// Normalise the heuristic mass and put the leftover on "unknown".
-	const totals = bootsScore + sashScore + balloonScore + evioliteScore + choiceScore + leftoversScore + avScore;
-	const rest = Math.max(0, 1 - totals);
-	dist.set("heavydutyboots", bootsScore);
-	dist.set("focussash", sashScore);
-	dist.set("airballoon", balloonScore);
-	dist.set("eviolite", evioliteScore);
-	dist.set("choicescarf", choiceScore * 0.45);
-	dist.set("choiceband", choiceScore * 0.35);
-	dist.set("choicespecs", choiceScore * 0.20);
-	dist.set("leftovers", leftoversScore);
-	dist.set("assaultvest", avScore);
+	// Normalise the heuristic mass so the distribution sums to ~1.0 even
+	// when individual heuristics over-allocate (e.g. an NFE foe through
+	// hazards mid choice-streak can otherwise total ~1.85).
+	const totals =
+		bootsScore + sashScore + balloonScore + evioliteScore +
+		choiceScore + leftoversScore + avScore;
+	const scale = totals > 1 ? 1 / totals : 1;
+	const rest = totals > 1 ? 0 : Math.max(0, 1 - totals);
+	dist.set("heavydutyboots", bootsScore * scale);
+	dist.set("focussash", sashScore * scale);
+	dist.set("airballoon", balloonScore * scale);
+	dist.set("eviolite", evioliteScore * scale);
+	dist.set("choicescarf", choiceScore * 0.45 * scale);
+	dist.set("choiceband", choiceScore * 0.35 * scale);
+	dist.set("choicespecs", choiceScore * 0.20 * scale);
+	dist.set("leftovers", leftoversScore * scale);
+	dist.set("assaultvest", avScore * scale);
 	dist.set("", rest);
 	return dist;
 }

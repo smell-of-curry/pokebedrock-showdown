@@ -13,7 +13,7 @@
  * 1. **Simulator fork** (when a `Battle` reference is available via
  *    `ctx.searchBudgetMs`'s sibling `forkBattle` hook): we use
  *    `Battle.toJSON()` / `Battle.fromJSON()` (declared at
- *    [sim/battle.ts L327-L333](D:\bedrock-server\pokebedrock-showdown\sim\battle.ts))
+ *    `sim/battle.ts:L327-L333`)
  *    to clone the full battle state, advance by one (or more) plies via
  *    the rollout policy, and read off the resulting expected utility.
  * 2. **Tracker-only fallback** (the default): we approximate forward

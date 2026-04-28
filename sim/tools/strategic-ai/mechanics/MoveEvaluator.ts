@@ -121,7 +121,9 @@ export function evaluateMove(
 	if (m.recoil && (attacker.hpFraction ?? 1) < 0.4) score -= 10;
 	if (m.mindBlownRecoil && (attacker.hpFraction ?? 1) < 0.6) score -= 15;
 	// Self-destruct: only if it KOs.
-	if (m.selfdestruct === "ifHit" || m.selfdestruct === true || m.selfdestruct === "always") {
+	// Move data only uses string literals (`"always"`, `"ifHit"`) for
+	// `selfdestruct`; the boolean form is dead.
+	if (m.selfdestruct === "ifHit" || m.selfdestruct === "always") {
 		if (calc.koProbability < 0.95) score -= 50;
 	}
 	// Drain moves: bonus for healing into the threat.
@@ -159,10 +161,21 @@ function evaluateStatus(
 		return { moveId, score, rationale };
 	}
 
-	// Stat-up moves.
-	if (move.boosts || move.self?.boosts || moveId === "shellsmash" || moveId === "bellydrum") {
+	// Self stat-up moves. `move.boosts` doubles as the foe-debuff field for
+	// moves like Growl / Charm / Tail Whip, so only treat it as a self-boost
+	// when the move actually targets the user.
+	const isSelfBoost =
+		!!move.self?.boosts ||
+		(!!move.boosts && move.target === "self") ||
+		moveId === "shellsmash" || moveId === "bellydrum";
+	if (isSelfBoost) {
 		const boostScore = scoreBoostMove(move, moveId, ctx);
 		return { moveId, score: boostScore, rationale: "boost" };
+	}
+	// Foe-target stat-drop moves (Growl, Charm, Tail Whip, Sand Attack, ...).
+	if (move.boosts) {
+		const debuffScore = scoreDebuffMove(move, ctx);
+		return { moveId, score: debuffScore, rationale: "debuff" };
 	}
 
 	// Status-inflicting moves.
@@ -340,6 +353,29 @@ function scoreBoostMove(
 	}
 	// Boost moves are awful when we're about to die.
 	if ((ctx.attacker.hpFraction ?? 1) < 0.25) score -= 10;
+	return score;
+}
+
+/**
+ * Score a foe-target stat-drop move (e.g. Growl, Tail Whip, Charm).
+ * The shape of `move.boosts` is identical to a self-boost, but the
+ * stages are *applied to the defender* and so should be inverted in
+ * sign relative to {@link scoreBoostMove}.
+ */
+function scoreDebuffMove(move: Move, ctx: MoveEvalContext): number {
+	const boosts = move.boosts ?? {};
+	const foeBoosts = ctx.defender.boosts;
+	let score = 0;
+	for (const [stat, amount] of Object.entries(boosts)) {
+		if (typeof amount !== "number") continue;
+		const cur = foeBoosts[stat] || 0;
+		// Drops below -6 do nothing; diminishing returns vs already-low foe.
+		const incremental = amount < 0 ? Math.max(0, 6 + cur) / 6 : 1;
+		const stageValue = stat === "spe" ? 10 : (stat === "atk" || stat === "spa" ? 8 : 5);
+		score += -amount * stageValue * incremental;
+	}
+	// Don't waste a turn debuffing a foe that's about to faint.
+	if ((ctx.defender.hpFraction ?? 1) < 0.2) score -= 5;
 	return score;
 }
 

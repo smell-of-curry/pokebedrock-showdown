@@ -25,6 +25,7 @@
 import { Dex, toID } from "../../../dex";
 import type { Move } from "../../../dex-moves";
 import type { BattleStateTracker, TrackedPokemon } from "../state/BattleStateTracker";
+import type { SideId } from "../state/LogParser";
 import {
 	calculateDamage,
 	estimateMaxHp,
@@ -83,10 +84,17 @@ export function evaluateMatchup(
 	const myCalc = fromTracked(mon);
 	const foeCalc = fromTracked(foe);
 
-	// Best-known foe attack on us.
-	const foeBest = bestAttackingDamage(foeCalc, myCalc, tracker, foe, mon, /* known */ true);
+	// Best-known foe attack on us. Side IDs are ordered (attacker, defender)
+	// so screens / Tailwind are read off the correct sides.
+	const foeBest = bestAttackingDamage(
+		foeCalc, myCalc, tracker, foe, mon, /* known */ true,
+		tracker.foeSide, tracker.mySide,
+	);
 	// Our best attack on the foe (using known moves first).
-	const myBest = bestAttackingDamage(myCalc, foeCalc, tracker, mon, foe, /* known */ false);
+	const myBest = bestAttackingDamage(
+		myCalc, foeCalc, tracker, mon, foe, /* known */ false,
+		tracker.mySide, tracker.foeSide,
+	);
 
 	const myMaxHp = estimateMaxHp(myCalc);
 	const foeMaxHp = estimateMaxHp(foeCalc);
@@ -165,7 +173,9 @@ function bestAttackingDamage(
 	tracker: BattleStateTracker,
 	attackerMon: TrackedPokemon,
 	defenderMon: TrackedPokemon,
-	useKnownOnly: boolean
+	useKnownOnly: boolean,
+	attackerSideId: SideId,
+	defenderSideId: SideId,
 ): { avgDamage: number, moveId: string } | null {
 	const moves: Move[] = [];
 	for (const id of attackerMon.revealedMoves) {
@@ -212,8 +222,8 @@ function bestAttackingDamage(
 			defender,
 			move: m,
 			field: tracker.field,
-			attackerSide: tracker.sides[tracker.mySide],
-			defenderSide: tracker.sides[tracker.foeSide],
+			attackerSide: tracker.sides[attackerSideId],
+			defenderSide: tracker.sides[defenderSideId],
 		});
 		if (!best || range.avgDamage > best.avgDamage) {
 			best = { avgDamage: range.avgDamage, moveId: toID(m.id || (m as { name?: string }).name || "") };

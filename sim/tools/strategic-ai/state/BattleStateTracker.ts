@@ -83,7 +83,7 @@ export interface TrackedPokemon {
 	stats?: { [stat: string]: number };
 	/** Active volatile effects (Substitute, Taunt, Encore, etc.) keyed by effect id. */
 	volatiles: Set<string>;
-	/** True when the mon has been faiunted at least once. */
+	/** True when the mon has been fainted at least once. */
 	fainted: boolean;
 	/** True if the mon is currently on the field. */
 	active: boolean;
@@ -209,6 +209,13 @@ export class BattleStateTracker {
 		null;
 	/** True after we've seen `|start|` (battle has begun). */
 	started: boolean;
+	/** True once a `|win|` or `|tie|` event has been observed. */
+	ended: boolean;
+	/** Winning side when known (real logs only carry the player *name*; we
+	 * record it best-effort via {@link winnerName}). */
+	winner: SideId | null;
+	/** Raw `|win|<name>` payload, when available. */
+	winnerName: string | null;
 
 	constructor(options: BattleStateTrackerOptions) {
 		this.mySide = options.mySide;
@@ -228,6 +235,9 @@ export class BattleStateTracker {
 		this.field = makeEmptyField();
 		this.lastRequest = null;
 		this.started = false;
+		this.ended = false;
+		this.winner = null;
+		this.winnerName = null;
 	}
 
 	// -------------------------------------------------------------------
@@ -414,6 +424,16 @@ export class BattleStateTracker {
 			case "battlestart":
 				this.started = true;
 				return;
+			case "win":
+				this.ended = true;
+				this.winner = event.side ?? null;
+				this.winnerName = event.name ?? null;
+				return;
+			case "tie":
+				this.ended = true;
+				this.winner = null;
+				this.winnerName = null;
+				return;
 			case "move": {
 				const mon = this.resolveByRef(event.user);
 				const moveId = toID(event.move);
@@ -459,7 +479,9 @@ export class BattleStateTracker {
 				mon.volatiles.clear();
 				mon.choiceLocked = false;
 				mon.sameMoveStreak = 0;
-				this.active[event.pokemon.side][event.pokemon.position] = mon.id;
+				if (isValidActivePosition(event.pokemon.position)) {
+					this.active[event.pokemon.side][event.pokemon.position] = mon.id;
+				}
 				return;
 			}
 			case "faint": {
@@ -470,7 +492,7 @@ export class BattleStateTracker {
 				mon.condition = "0 fnt";
 				this.sides[event.pokemon.side].fainted += 1;
 				const slotIdx = event.pokemon.position;
-				if (slotIdx >= 0 && this.active[event.pokemon.side][slotIdx] === mon.id) {
+				if (isValidActivePosition(slotIdx) && this.active[event.pokemon.side][slotIdx] === mon.id) {
 					this.active[event.pokemon.side][slotIdx] = "";
 				}
 				return;
@@ -636,7 +658,13 @@ export class BattleStateTracker {
 			case "ability": {
 				const mon = this.resolveByRef(event.pokemon);
 				mon.ability = toID(event.ability);
-				if (!mon.baseAbility) mon.baseAbility = mon.ability;
+				// Only seed `baseAbility` from a fresh, non-derived reveal.
+				// Trace / Imposter / Skill Swap / Role Play / etc. show up
+				// with an `event.from` describing the source effect; those
+				// expose the *acquired* ability, not the species' own.
+				if (!mon.baseAbility && !event.from) {
+					mon.baseAbility = mon.ability;
+				}
 				return;
 			}
 			case "endability": {
@@ -651,12 +679,7 @@ export class BattleStateTracker {
 			}
 			case "enditem": {
 				const mon = this.resolveByRef(event.pokemon);
-				// Don't stomp item if the message indicates a swap (`from move:Trick` etc).
-				if (!event.from || /^(?:move:|ability:)/i.test(event.from)) {
-					mon.item = "";
-				} else {
-					mon.item = "";
-				}
+				mon.item = "";
 				return;
 			}
 			case "transform": {
@@ -751,9 +774,20 @@ export class BattleStateTracker {
 	isGrounded(side: SideId, position: number): boolean {
 		const mon = this.getActive(side, position);
 		if (!mon) return true;
+		return this.isMonGrounded(mon);
+	}
+
+	/**
+	 * Mon-keyed groundedness check, shared between {@link isGrounded}
+	 * (the active-slot accessor) and {@link hazardDamageFraction} (the
+	 * switch-in projection). Considers Gravity, Iron Ball, Smack Down,
+	 * Ingrain, Magnet Rise, Telekinesis, Air Balloon, Levitate, and
+	 * Flying type.
+	 */
+	private isMonGrounded(mon: TrackedPokemon): boolean {
 		if (this.field.gravity) return true;
 		if (mon.volatiles.has("smackdown") || mon.volatiles.has("ingrain")) return true;
-		if (mon.volatiles.has("magnetrise")) return false;
+		if (mon.volatiles.has("magnetrise") || mon.volatiles.has("telekinesis")) return false;
 		if (mon.item === "ironball") return true;
 		if (mon.item === "airballoon") return false;
 		if (mon.ability === "levitate") return false;
@@ -776,10 +810,7 @@ export class BattleStateTracker {
 			const eff = effectivenessLog(["Rock"], mon.types);
 			damage += 0.125 * 2 ** eff;
 		}
-		const grounded = !mon.types.includes("Flying") &&
-			mon.ability !== "levitate" &&
-			mon.item !== "airballoon";
-		if (grounded) {
+		if (this.isMonGrounded(mon)) {
 			if (ss.spikes === 1) damage += 1 / 8;
 			else if (ss.spikes === 2) damage += 1 / 6;
 			else if (ss.spikes >= 3) damage += 1 / 4;
@@ -833,6 +864,17 @@ function identMatches(ident: string, name: string): boolean {
 	const colon = ident.indexOf(":");
 	if (colon < 0) return false;
 	return ident.slice(colon + 1).trim() === name;
+}
+
+/**
+ * True if `position` is a real active-slot index (0..2). Active slots
+ * in the Showdown protocol are encoded as `a`, `b`, `c` after the side
+ * id, mapped to 0/1/2 by {@link parsePokemonRef}. Anything else (notably
+ * `-1` for benched references) must not be used to index into the
+ * per-side active arrays.
+ */
+function isValidActivePosition(position: number): boolean {
+	return Number.isInteger(position) && position >= 0 && position <= 2;
 }
 
 function clampStage(stage: number): number {

@@ -101,10 +101,13 @@ export class RandomEngine implements Engine {
 		const chosenSlots: number[] = [];
 		const commands = mustSwitchFlags.map((mustSwitch, slotIndex) => {
 			if (!mustSwitch) return "pass";
-			const validSwitches = range(1, 6).filter(benchSlot => {
+			const validSwitches = range(1, pokemon.length).filter(benchSlot => {
 				const benchPoke = pokemon[benchSlot - 1];
 				if (!benchPoke) return false;
-				if (benchSlot <= mustSwitchFlags.length) return false;
+				// Active mons are not necessarily the first N entries of
+				// `request.side.pokemon`; rely on the request's own
+				// `active` flag rather than list position.
+				if (benchPoke.active) return false;
 				if (chosenSlots.includes(benchSlot)) return false;
 				const fainted = benchPoke.condition.endsWith(" fnt");
 				if (fainted && !benchPoke.reviving) return false;
@@ -133,16 +136,26 @@ export class RandomEngine implements Engine {
 		const moveProb = ctx.randomMoveProb ?? 1.0;
 		const megaProb = ctx.randomMegaProb ?? 0;
 
+		// Showdown only accepts one Mega / Ultra Burst / Dynamax / Tera
+		// per battle, but the request's `canX` flags are repeated across
+		// every active slot. Track which ones have been claimed so we
+		// don't emit two transform commands in the same turn.
+		const transformsUsed = {
+			mega: false,
+			ultra: false,
+			dynamax: false,
+			tera: false,
+		};
 		const commands = activeSlots.map((active, i) => {
 			const me = myPokemon[i];
 			if (!me) return "pass";
 			if (me.condition.endsWith(" fnt") || me.commanding) return "pass";
 
-			let canMegaEvo = !!active.canMegaEvo;
-			let canUltraBurst = !!active.canUltraBurst;
+			const canMegaEvo = !!active.canMegaEvo && !transformsUsed.mega;
+			const canUltraBurst = !!active.canUltraBurst && !transformsUsed.ultra;
 			let canZMove = !!active.canZMove;
-			let canDynamax = !!active.canDynamax;
-			let canTerastallize = !!active.canTerastallize;
+			const canDynamax = !!active.canDynamax && !transformsUsed.dynamax;
+			const canTerastallize = !!active.canTerastallize && !transformsUsed.tera;
 
 			const doTransform =
 				(canMegaEvo || canUltraBurst || canDynamax || canTerastallize) &&
@@ -241,16 +254,16 @@ export class RandomEngine implements Engine {
 			}
 			if (doTransform) {
 				if (canTerastallize) {
-					canTerastallize = false;
+					transformsUsed.tera = true;
 					return `${chosenMove} terastallize`;
 				} else if (canDynamax) {
-					canDynamax = false;
+					transformsUsed.dynamax = true;
 					return `${chosenMove} dynamax`;
 				} else if (canMegaEvo) {
-					canMegaEvo = false;
+					transformsUsed.mega = true;
 					return `${chosenMove} mega`;
 				} else if (canUltraBurst) {
-					canUltraBurst = false;
+					transformsUsed.ultra = true;
 					return `${chosenMove} ultra`;
 				}
 			}

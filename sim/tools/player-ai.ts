@@ -169,20 +169,57 @@ export class PlayerAI extends BattlePlayer {
 	 * move id to the specific Pokemon so it doesn't leak across switches.
 	 */
 	override receiveError(error: Error): void {
-		const [, , suffix, message] = /^\[(.*?)\] (.*?): (.*)$/.exec(error.message) || [];
+		// Anchored, non-greedy bounded character classes: avoids polynomial
+		// backtracking the lazy `(.*?)(.*?)(.*)` form would otherwise
+		// exhibit on adversarial messages while preserving the original
+		// match semantics for `[Can't move] X: Y is disabled`.
+		const m1 = /^\[([^\]]+)\] ([^:]+): (.+)$/s.exec(error.message);
+		if (!m1) return;
+		const suffix = m1[1];
+		const message = m1[3];
 		if (suffix !== "Can't move") return;
-		const m = /^(.+?)'s (.+?) is disabled/.exec(message ?? "");
-		if (!m) return;
-		const monName = m[1].trim();
-		const moveId = toID(m[2]);
+		const m2 = /^([^']+)'s ([^ ]+(?: [^ ]+)*) is disabled$/.exec(message);
+		if (!m2) return;
+		const monName = m2[1].trim();
+		const moveId = toID(m2[2]);
 		const sideId = this.tracker?.mySide ?? "p1";
-		const monKey = `${sideId}|${monName}`;
-		let set = this.engineCtx.disabledMovesByMon.get(monKey);
-		if (!set) {
-			set = new Set();
-			this.engineCtx.disabledMovesByMon.set(monKey, set);
+		// Engines key `disabledMovesByMon` by the same id `monIdForSlot`
+		// returns: UUID when the request exposes one, else `${sideId}|${name}`.
+		// Resolve the UUID via the tracker so the lookup matches.
+		const fallbackKey = `${sideId}|${monName}`;
+		const trackedId = this.resolveMonIdFromTracker(sideId, monName);
+		const keys = trackedId && trackedId !== fallbackKey ?
+			[trackedId, fallbackKey] :
+			[fallbackKey];
+		for (const key of keys) {
+			let set = this.engineCtx.disabledMovesByMon.get(key);
+			if (!set) {
+				set = new Set();
+				this.engineCtx.disabledMovesByMon.set(key, set);
+			}
+			set.add(moveId);
 		}
-		set.add(moveId);
+	}
+
+	/**
+	 * Best-effort lookup of the tracker's monId for a given side+nickname.
+	 * Returns `null` if we don't have a tracker yet (e.g. the error
+	 * arrived before any `|request|` did).
+	 */
+	private resolveMonIdFromTracker(sideId: SideId, name: string): string | null {
+		const t = this.tracker;
+		if (!t) return null;
+		const req = t.lastRequest;
+		const side = (req as { side?: { pokemon?: { ident: string, uuid?: string }[] } } | null)?.side;
+		if (!side?.pokemon) return null;
+		for (const p of side.pokemon) {
+			const colon = p.ident.indexOf(":");
+			const pName = colon >= 0 ? p.ident.slice(colon + 1).trim() : p.ident;
+			if (pName === name) {
+				return p.uuid || `${sideId}|${name}`;
+			}
+		}
+		return null;
 	}
 
 	/** Convert a `ChoiceRequest` into a showdown command string. */

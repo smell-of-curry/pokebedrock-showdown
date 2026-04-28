@@ -71,6 +71,13 @@ export interface CalcPokemon {
 	species: string;
 	/** Effective types this turn. May be `[teraType]` if Terastallized. */
 	types: string[];
+	/**
+	 * Original (pre-Tera) types, when the mon is currently Terastallized.
+	 * Used to detect "Tera into existing STAB" so the calc can apply the
+	 * 2.0x / 2.25x multiplier instead of the bare 1.5x / 2.0x STAB.
+	 * Optional; when omitted we fall back to legacy STAB rules.
+	 */
+	originalTypes?: string[];
 	/** Tera type if known. */
 	teraType?: string;
 	/** True if this mon is currently Terastallized. */
@@ -285,15 +292,25 @@ function singleHitDamage(
 
 	// STAB.
 	const stabApplies = moveTypeMatchesUserType(moveType, attacker);
-	if (stabApplies) {
-		const adapt = toID(attacker.ability) === "adaptability";
+	const adapt = toID(attacker.ability) === "adaptability";
+	const isTera = !!attacker.terastallized && !!attacker.teraType;
+	const teraMatchesMove = isTera && moveType === attacker.teraType;
+	// "Tera into existing STAB": move type matches both the Tera type and
+	// one of the user's *original* (pre-Tera) types. Gen 9 grants 2.0x
+	// (2.25x with Adaptability) in that case. We detect it via
+	// `originalTypes`, which transform-aware callers populate before
+	// overwriting `types` with `[teraType]`.
+	const teraOnOriginalStab = teraMatchesMove && !!attacker.originalTypes &&
+		attacker.originalTypes.includes(moveType);
+	if (teraOnOriginalStab) {
+		damage *= adapt ? 2.25 : 2.0;
+	} else if (stabApplies) {
 		damage *= adapt ? 2.0 : 1.5;
-	}
-	// Tera adds STAB on the Tera type even if user is no longer that type
-	if (attacker.terastallized && attacker.teraType && moveType === attacker.teraType && !stabApplies) {
+	} else if (teraMatchesMove) {
+		// Tera grants 1.5x STAB on the Tera type even when the user is
+		// no longer that type post-Tera.
 		damage *= 1.5;
 	}
-	// Adaptability + same Tera type + same original type => 2.25 (handled by sequence above).
 
 	// Type effectiveness.
 	const eff = typeEffectivenessExp(moveType, defender);
@@ -599,17 +616,20 @@ function computeBasePower(move: Move, moveType: string, input: DamageCalcInput):
 function computeOffensiveStat(move: Move, input: DamageCalcInput): number {
 	const id = toID(move.id || (move as { name?: string }).name || "");
 	const physical = isPhysicalForCalc(move, input);
+	const crit = !!input.forceCrit;
 	let baseStat: number;
 	if (id === "bodypress") {
-		baseStat = effectiveStat(input.attacker, "def");
+		baseStat = effectiveStat(input.attacker, "def", /* ignoreNeg */ crit);
 	} else if (id === "foulplay") {
-		baseStat = effectiveStat(input.defender, "atk");
+		// Foul Play reads the defender's attack as if it were the user's,
+		// so the attacker-side crit rule (ignore negative stages) applies.
+		baseStat = effectiveStat(input.defender, "atk", /* ignoreNeg */ crit);
 	} else if (id === "photongeyser") {
-		const atk = effectiveStat(input.attacker, "atk");
-		const spa = effectiveStat(input.attacker, "spa");
+		const atk = effectiveStat(input.attacker, "atk", /* ignoreNeg */ crit);
+		const spa = effectiveStat(input.attacker, "spa", /* ignoreNeg */ crit);
 		baseStat = Math.max(atk, spa);
 	} else {
-		baseStat = effectiveStat(input.attacker, physical ? "atk" : "spa");
+		baseStat = effectiveStat(input.attacker, physical ? "atk" : "spa", /* ignoreNeg */ crit);
 	}
 	const ability = toID(input.attacker.ability);
 	if ((ability === "hugepower" || ability === "purepower") && physical) baseStat *= 2;
@@ -644,7 +664,8 @@ function computeDefensiveStat(move: Move, input: DamageCalcInput): number {
 	} else {
 		stat = isPhysicalForCalc(move, input) ? "def" : "spd";
 	}
-	let value = effectiveStat(input.defender, stat, !!input.forceCrit);
+	// On crit, ignore the defender's *positive* defensive stages.
+	let value = effectiveStat(input.defender, stat, /* ignoreNeg */ false, /* ignorePos */ !!input.forceCrit);
 	const item = toID(input.defender.item);
 	const species = input.defender.species;
 	if (item === "eviolite" && isNFE(species)) value *= 1.5;
@@ -662,11 +683,27 @@ function computeDefensiveStat(move: Move, input: DamageCalcInput): number {
 	return value;
 }
 
-function effectiveStat(mon: CalcPokemon, stat: keyof StatBlock, ignoreNegativeBoost = false): number {
+/**
+ * Resolve a stat value with optional crit-aware stage filtering.
+ *
+ * Showdown's crit rule: ignore the *attacker's negative* offensive
+ * stages and the *defender's positive* defensive stages — the boosts
+ * that would otherwise help the side hit by the crit. Pass
+ * `ignoreNegativeStage` for the attacker's stat and
+ * `ignorePositiveStage` for the defender's stat.
+ */
+function effectiveStat(
+	mon: CalcPokemon,
+	stat: keyof StatBlock,
+	ignoreNegativeStage = false,
+	ignorePositiveStage = false,
+): number {
 	const stats = ensureStats(mon);
 	let value = stats[stat] || 1;
 	const stage = mon.boosts[stat] || 0;
-	const useStage = ignoreNegativeBoost && stage < 0 ? 0 : stage;
+	let useStage = stage;
+	if (ignoreNegativeStage && useStage < 0) useStage = 0;
+	if (ignorePositiveStage && useStage > 0) useStage = 0;
 	if (useStage > 0) value = Math.floor(value * (2 + useStage) / 2);
 	else if (useStage < 0) value = Math.floor(value * 2 / (2 - useStage));
 	return value;

@@ -50,7 +50,7 @@ export type BattleEvent =
 	{ kind: "rule", rule: string } |
 	{ kind: "teamsize", side: SideId, size: number } |
 	{ kind: "battlestart" } |
-	{ kind: "win", side?: SideId } |
+	{ kind: "win", side?: SideId, name?: string } |
 	{ kind: "tie" } |
 	{ kind: "move", user: PokemonRef, move: string, target?: PokemonRef, missed: boolean, from?: string } |
 	{ kind: "switch", pokemon: PokemonRef, details: string, hp: string, status: string, forced: boolean } |
@@ -181,9 +181,13 @@ export function parseLine(line: string): BattleEvent | null {
 		case "start":
 			return { kind: "battlestart" };
 		case "win": {
-			const sideArg = (args[0] || "").trim();
-			const side = /^p[1-4]$/.test(sideArg) ? (sideArg as SideId) : undefined;
-			return { kind: "win", side };
+			// Real Showdown logs use `|win|<player name>` (e.g. `|win|Bot 1`),
+			// but tools and replay fixtures sometimes pre-normalise to a
+			// raw side id. Accept both: keep `side` populated when we can
+			// detect it, expose the raw payload as `name` otherwise.
+			const arg = (args[0] || "").trim();
+			const side = /^p[1-4]$/.test(arg) ? (arg as SideId) : undefined;
+			return { kind: "win", side, name: arg || undefined };
 		}
 		case "tie":
 			return { kind: "tie" };

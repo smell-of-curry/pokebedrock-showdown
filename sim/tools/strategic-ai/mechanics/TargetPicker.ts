@@ -102,21 +102,36 @@ function scoreTarget(foe: TrackedPokemon, input: TargetPickInput): number {
 	if (range.koProbability >= 0.95) score += 1500;
 	else if (range.koProbability >= 0.5) score += 800;
 
-	// Redirection penalty.
+	// Redirection: Storm Drain / Lightning Rod / Follow Me / Rage Powder
+	// pull single-target moves on our side onto the redirector, regardless
+	// of which foe slot we explicitly target. The penalty therefore needs
+	// to land on the *non-redirector* slots so the picker effectively
+	// surfaces the redirector as the highest-scoring target (since that's
+	// where the move will end up anyway).
 	const moveType = move.type;
-	for (const ally of input.allySlots) {
-		if (ally.id === foe.id) continue;
-		if (ally.id === attacker.id) continue;
+	const allyRedirector = input.allySlots.find(ally => {
+		if (ally.id === attacker.id) return false;
 		const ab = toID(ally.ability);
-		if (ab === "stormdrain" && moveType === "Water") score -= 1000;
-		if (ab === "lightningrod" && moveType === "Electric") score -= 1000;
+		return (ab === "stormdrain" && moveType === "Water") ||
+			(ab === "lightningrod" && moveType === "Electric");
+	});
+	if (allyRedirector) {
+		// An ally with Storm Drain / Lightning Rod siphons our own move.
+		// We don't gain anything by spamming it into a foe slot; mark all
+		// foe slots equally bad. Conservative penalty applied to every foe.
+		score -= 1000;
 	}
-	for (const f of input.foeSlots) {
-		if (f.id === foe.id) continue;
-		if (toID(f.ability) === "stormdrain" && moveType === "Water") score -= 500;
-		if (toID(f.ability) === "lightningrod" && moveType === "Electric") score -= 500;
-	}
-	if (foe.volatiles.has("followme") || foe.volatiles.has("ragepowder")) {
+
+	const foeRedirector = input.foeSlots.find(f => {
+		const ab = toID(f.ability);
+		const hasVolatile = f.volatiles.has("followme") || f.volatiles.has("ragepowder");
+		return hasVolatile ||
+			(ab === "stormdrain" && moveType === "Water") ||
+			(ab === "lightningrod" && moveType === "Electric");
+	});
+	if (foeRedirector && foeRedirector.id !== foe.id) {
+		// Picking the non-redirector is pointless — the simulator will
+		// reroute the move to the redirector regardless.
 		score -= 800;
 	}
 

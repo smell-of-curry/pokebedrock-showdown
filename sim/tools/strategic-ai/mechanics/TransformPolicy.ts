@@ -128,7 +128,13 @@ function teraOffensiveValue(
 	// or 2.0 baseline if we didn't have STAB before).
 	const hadStab = me.types.includes(teraType);
 	const calc = calculateDamage({
-		attacker: { ...fromTracked(me), terastallized: true, types: [teraType], teraType },
+		attacker: {
+			...fromTracked(me),
+			terastallized: true,
+			types: [teraType],
+			originalTypes: me.types.slice(),
+			teraType,
+		},
 		defender: fromTracked(foe),
 		move,
 		field: tracker.field,
@@ -163,7 +169,13 @@ function teraTeraBlastValue(
 	if (!move) return 0;
 	const proxy = { ...move, type: teraType } as Move;
 	const calc = calculateDamage({
-		attacker: { ...fromTracked(me), terastallized: true, types: [teraType], teraType },
+		attacker: {
+			...fromTracked(me),
+			terastallized: true,
+			types: [teraType],
+			originalTypes: me.types.slice(),
+			teraType,
+		},
 		defender: fromTracked(foe),
 		move: proxy,
 		field: tracker.field,

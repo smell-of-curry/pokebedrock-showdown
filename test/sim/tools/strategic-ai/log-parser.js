@@ -58,9 +58,18 @@ describe('Strategic-AI LogParser', () => {
 			assert.deepEqual(ev, { kind: 'battlestart' });
 		});
 
-		it('parses |win|p2|', () => {
+		it('parses |win|<side>| in normalised form', () => {
 			const ev = parseLine('|win|p2');
-			assert.deepEqual(ev, { kind: 'win', side: 'p2' });
+			assert.equal(ev.kind, 'win');
+			assert.equal(ev.side, 'p2');
+			assert.equal(ev.name, 'p2');
+		});
+
+		it('parses |win|<player name>| from real Showdown logs', () => {
+			const ev = parseLine('|win|Bot 1');
+			assert.equal(ev.kind, 'win');
+			assert.equal(ev.side, undefined);
+			assert.equal(ev.name, 'Bot 1');
 		});
 
 		it('parses |tie|', () => {
