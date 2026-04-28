@@ -116,7 +116,19 @@ function inferMoves(mon: TrackedPokemon): Distribution {
 	// Spread `remaining` over the species' legal moves we haven't seen yet.
 	const learnset = legalMoves(mon.species);
 	const unseen = learnset.filter(m => !revealed.includes(m));
-	if (unseen.length === 0) return dist;
+	if (unseen.length === 0) {
+		// No unseen moves to absorb the remaining mass — renormalize the
+		// existing entries so the `Distribution` invariant (probabilities
+		// sum to ~1) holds for downstream consumers.
+		let total = 0;
+		for (const v of dist.values()) total += v;
+		if (total > 0) {
+			for (const [id, v] of Array.from(dist.entries())) {
+				dist.set(id, v / total);
+			}
+		}
+		return dist;
+	}
 	const per = remaining / unseen.length;
 	for (const id of unseen) {
 		dist.set(id, (dist.get(id) || 0) + per);

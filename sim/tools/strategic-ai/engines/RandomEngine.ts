@@ -227,11 +227,27 @@ export class RandomEngine implements Engine {
 
 			if (!finalMoves.length) return "pass";
 
+			// Build the list of live foe target indices once per slot. For
+			// `normal` / `any` / `adjacentFoe` moves we sample from this
+			// instead of hard-coding `{1, 2}`: after a KO that constant
+			// can point at an empty/fainted slot and the simulator
+			// rejects the choice as illegal.
+			const liveFoeTargets: number[] = [];
+			const foes = (request.side?.foePokemon ?? []);
+			for (let f = 0; f < foes.length; f++) {
+				const fp = foes[f];
+				if (fp && fp.active && !fp.condition.endsWith(" fnt")) {
+					liveFoeTargets.push(f + 1);
+				}
+			}
+
 			for (const opt of finalMoves) {
 				let choiceStr = `move ${opt.slot}`;
 				if (request.active && request.active.length > 1) {
-					if (["normal", "any", "adjacentFoe"].includes(opt.target ?? "")) {
-						choiceStr += ` ${1 + Math.floor(ctx.prng.random() * 2)}`;
+					if (["normal", "any", "adjacentFoe"].includes(opt.target ?? "") &&
+						liveFoeTargets.length) {
+						const t = liveFoeTargets[Math.floor(ctx.prng.random() * liveFoeTargets.length)];
+						choiceStr += ` ${t}`;
 					}
 					if (opt.target === "adjacentAlly") {
 						choiceStr += ` -${(i ^ 1) + 1}`;

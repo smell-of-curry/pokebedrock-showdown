@@ -241,22 +241,33 @@ function computeSpeedDelta(
 	foe: TrackedPokemon,
 	tracker: BattleStateTracker
 ): number {
-	const mySpe = scaledSpeed(mon, tracker.sides[tracker.mySide].tailwindTurns > 0);
-	const foeSpe = scaledSpeed(foe, tracker.sides[tracker.foeSide].tailwindTurns > 0);
+	const weather = tracker.field.weather;
+	const mySpe = scaledSpeed(mon, tracker.sides[tracker.mySide].tailwindTurns > 0, weather);
+	const foeSpe = scaledSpeed(foe, tracker.sides[tracker.foeSide].tailwindTurns > 0, weather);
 	let delta = mySpe - foeSpe;
 	if (tracker.field.trickRoom) delta = -delta;
 	return delta;
 }
 
-function scaledSpeed(mon: TrackedPokemon, tailwind: boolean): number {
+function scaledSpeed(mon: TrackedPokemon, tailwind: boolean, weather: string): number {
 	let spe = mon.stats?.spe ?? approximateSpeed(mon);
 	const stage = mon.boosts.spe || 0;
 	if (stage > 0) spe = Math.floor(spe * (2 + stage) / 2);
 	else if (stage < 0) spe = Math.floor(spe * 2 / (2 - stage));
 	if (toID(mon.item) === "choicescarf") spe = Math.floor(spe * 1.5);
-	if (toID(mon.ability) === "swiftswim") spe *= 2;
+	const ability = toID(mon.ability);
+	const isRain = weather === "raindance" || weather === "primordialsea";
+	const isSun = weather === "sunnyday" || weather === "desolateland";
+	if (ability === "swiftswim" && isRain) spe *= 2;
+	if (ability === "chlorophyll" && isSun) spe *= 2;
+	if (ability === "sandrush" && weather === "sandstorm") spe *= 2;
+	if (ability === "slushrush" &&
+		(weather === "snow" || weather === "snowscape" || weather === "hail")) {
+		spe *= 2;
+	}
 	if (tailwind) spe *= 2;
-	if (mon.status === "par") spe = Math.floor(spe / 2);
+	if (mon.status === "par" && ability !== "quickfeet") spe = Math.floor(spe / 2);
+	if (ability === "quickfeet" && mon.status) spe = Math.floor(spe * 1.5);
 	return spe;
 }
 

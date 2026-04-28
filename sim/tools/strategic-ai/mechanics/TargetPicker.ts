@@ -64,7 +64,15 @@ export function pickTarget(input: TargetPickInput): TargetIndex | null {
 		target === "allySide" ||
 		target === "self" ||
 		target === "scripted" ||
-		target === "randomNormal"
+		target === "randomNormal" ||
+		// Ally-targeted moves (Helping Hand, Coaching, Decorate, Pollen
+		// Puff into ally, ...) don't take a foe slot index. Callers are
+		// expected to format these themselves with a negative target;
+		// we just return `null` so a misuse here can't manufacture an
+		// illegal positive index.
+		target === "adjacentAlly" ||
+		target === "adjacentAllyOrSelf" ||
+		target === "allies"
 	) {
 		return null;
 	}

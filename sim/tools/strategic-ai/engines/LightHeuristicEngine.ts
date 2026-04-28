@@ -187,8 +187,21 @@ export class LightHeuristicEngine implements Engine {
 		switch (move.target) {
 			case "normal":
 			case "any":
-			case "adjacentFoe":
-				return `move ${best.idx} 1`;
+			case "adjacentFoe": {
+				// Pick the first live foe slot rather than hard-coding `1`:
+				// after a KO slot 1 may be empty, which would be rejected
+				// by the simulator as an illegal target.
+				const foes = request.side?.foePokemon ?? [];
+				let target = 0;
+				for (let i = 0; i < foes.length; i++) {
+					const fp = foes[i];
+					if (fp && fp.active && !fp.condition.endsWith(" fnt")) {
+						target = i + 1;
+						break;
+					}
+				}
+				return target ? `move ${best.idx} ${target}` : `move ${best.idx}`;
+			}
 			case "adjacentAlly":
 				return `move ${best.idx} -${(slotIndex ^ 1) + 1}`;
 			default:

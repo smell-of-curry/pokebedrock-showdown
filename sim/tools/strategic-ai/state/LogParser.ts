@@ -168,8 +168,15 @@ export function parseLine(line: string): BattleEvent | null {
 	const args = parts.slice(1);
 	if (!kind) return null;
 	switch (kind) {
-		case "turn":
-			return { kind: "turn", turn: parseInt(args[0]) || 0 };
+		case "turn": {
+			// Reject malformed `|turn|foo` rather than fabricating turn 0,
+			// per the parser contract: "anything we can't parse returns
+			// null". Coercing NaN to 0 would silently advance tracker
+			// state on garbage input.
+			const turn = parseInt(args[0] ?? "");
+			if (Number.isNaN(turn)) return null;
+			return { kind: "turn", turn };
+		}
 		case "gametype":
 			return { kind: "gametype", gametype: args[0] || "singles" };
 		case "gen": {
@@ -182,10 +189,11 @@ export function parseLine(line: string): BattleEvent | null {
 		case "rule":
 			return { kind: "rule", rule: args[0] || "" };
 		case "teamsize": {
-			const side = args[0] as SideId;
-			const size = parseInt(args[1]) || 0;
-			if (!side) return null;
-			return { kind: "teamsize", side, size };
+			const sideRaw = (args[0] || "").trim();
+			if (!isSideId(sideRaw)) return null;
+			const size = parseInt(args[1] ?? "");
+			if (Number.isNaN(size)) return null;
+			return { kind: "teamsize", side: sideRaw, size };
 		}
 		case "start":
 			return { kind: "battlestart" };

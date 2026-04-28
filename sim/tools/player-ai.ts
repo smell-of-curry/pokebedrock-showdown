@@ -178,7 +178,10 @@ export class PlayerAI extends BattlePlayer {
 		const suffix = m1[1];
 		const message = m1[3];
 		if (suffix !== "Can't move") return;
-		const m2 = /^([^']+)'s ([^ ]+(?: [^ ]+)*) is disabled$/.exec(message);
+		// Lazy `(.+?)` for the owner (allows apostrophes in names like
+		// `Farfetch'd`), anchored end + literal ` is disabled` keep the
+		// match bounded so this doesn't backtrack pathologically.
+		const m2 = /^(.+?)'s (.+) is disabled$/.exec(message);
 		if (!m2) return;
 		const monName = m2[1].trim();
 		const moveId = toID(m2[2]);

@@ -130,6 +130,22 @@ export function evaluateMove(
 	if (m.drain) {
 		score += 4;
 	}
+	// Damaging hazard removers (Rapid Spin, Mortal Spin) — the
+	// hazard-removal block in `evaluateStatus` is unreachable for these
+	// moves because they are Physical-category, so we add the same
+	// utility here on the damage path.
+	if (moveId === "rapidspin" || moveId === "mortalspin") {
+		const mySideState = tracker.sides[ctx.mySide];
+		const myHazards =
+			(mySideState.stealthRock ? 1 : 0) +
+			mySideState.spikes +
+			mySideState.toxicSpikes +
+			(mySideState.stickyWeb ? 1 : 0);
+		if (myHazards > 0) {
+			score += myHazards * 12;
+			rationale = "hazardRemoval";
+		}
+	}
 	return { moveId, score, damage: calc, rationale };
 }
 
@@ -321,7 +337,9 @@ function isRecoveryMove(moveId: string, move: Move): boolean {
 		case "shoreup":
 		case "slackoff":
 		case "rest":
-		case "wish":
+		// `wish` is intentionally NOT here: it has a dedicated branch in
+		// `evaluateStatus` (delayed self-heal scoring) that would otherwise
+		// be unreachable.
 		case "healorder":
 		case "lifedew":
 			return true;

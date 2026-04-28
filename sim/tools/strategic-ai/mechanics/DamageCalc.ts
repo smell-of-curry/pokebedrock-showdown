@@ -914,9 +914,21 @@ function isNFE(speciesId: string): boolean {
  * don't have to spread the same fields every time.
  */
 export function fromTracked(mon: TrackedPokemon): CalcPokemon {
+	// Preserve pre-Tera types so the STAB calculation can detect "Tera
+	// onto an existing STAB" (gen 9 grants 2.0×/2.25× there). Once a mon
+	// is Terastallized, `mon.types` has been overwritten with
+	// `[teraType]`, so we fall back to the species' canonical types from
+	// the dex.
+	let originalTypes: string[] | undefined;
+	if (mon.terastallized) {
+		const species = Dex.species.get(toID(mon.species));
+		const speciesTypes = species?.exists ? species.types : undefined;
+		originalTypes = speciesTypes ? [...speciesTypes] : [...mon.types];
+	}
 	return {
 		species: toID(mon.species),
 		types: mon.types,
+		originalTypes,
 		teraType: mon.teraType,
 		terastallized: mon.terastallized,
 		level: mon.level,

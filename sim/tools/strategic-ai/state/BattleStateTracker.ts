@@ -365,7 +365,10 @@ export class BattleStateTracker {
 			tracked.boosts = { ...(data.boosts || tracked.boosts) };
 			tracked.baseAbility = data.baseAbility || tracked.baseAbility;
 			tracked.ability = data.ability || tracked.ability || tracked.baseAbility;
-			if (data.item !== undefined) tracked.item = data.item || tracked.item;
+			// Authoritative item update: an explicit empty string from
+			// the request means the item has been consumed/knocked off,
+			// so we must not fall back to the prior value.
+			if (data.item !== undefined) tracked.item = data.item;
 			tracked.stats = data.stats ?? tracked.stats;
 			tracked.teraType = data.teraType ?? tracked.teraType;
 			if (data.terastallized) {

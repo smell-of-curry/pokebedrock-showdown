@@ -210,11 +210,14 @@ function considerZMove(input: TransformPolicyInput): TransformDecision | null {
 	if (!chosen) return null;
 	// Estimate baseline damage from the regular move.
 	const move = Dex.moves.get(chosenMoveId);
-	if (!move?.exists || move.category === "Status") {
-		// Z-status: useful, but weak; only fire when nothing better is
-		// happening. We approximate via a flat 8 score.
-		return { suffix: " zmove", rationale: "z-status" };
-	}
+	if (!move?.exists) return null;
+	// Z-status moves grant a free +1 boost / clear status on top of the
+	// base effect. They're occasionally worth it, but blanket-firing on
+	// any chosen status move burns the one-shot resource on routine
+	// setup turns and preempts the lower-priority Mega/Dynamax branches
+	// (TransformPolicy returns the first matching transform). Defer to
+	// the caller: don't auto-consume Z on status moves.
+	if (move.category === "Status") return null;
 	const baseline = calculateDamage({
 		attacker: fromTracked(myMon),
 		defender: fromTracked(foeMon),
