@@ -350,8 +350,8 @@ function simpleDamage(
 	// so guard with optional chaining and a neutral default.
 	let atkStat = (isPhysical ? atk.stats?.atk : atk.stats?.spa) ?? 100;
 	let defStat = (isPhysical ? def.stats?.def : def.stats?.spd) ?? 100;
-	atkStat *= boostMul(atk.boosts[isPhysical ? "atk" : "spa"] || 0);
-	defStat *= boostMul(def.boosts[isPhysical ? "def" : "spd"] || 0);
+	atkStat *= boostMul(atk.boosts?.[isPhysical ? "atk" : "spa"] || 0);
+	defStat *= boostMul(def.boosts?.[isPhysical ? "def" : "spd"] || 0);
 	const ability = (atk.ability || atk.baseAbility || "").toLowerCase();
 	if (isPhysical && (ability === "hugepower" || ability === "purepower")) atkStat *= 2;
 	const item = (atk.item || "").toLowerCase();

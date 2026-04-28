@@ -35,7 +35,7 @@ import type {
 	TeamPreviewRequest,
 	SideRequestData,
 } from "../../../side";
-import type { BattleEvent, PokemonRef, SideId } from "./LogParser";
+import { isSideId, type BattleEvent, type PokemonRef, type SideId } from "./LogParser";
 
 /** Identity of a tracked Pokemon. We use UUID when available
  * (PokeBedrock extension) and fall back to nickname. */
@@ -479,7 +479,10 @@ export class BattleStateTracker {
 				mon.volatiles.clear();
 				mon.choiceLocked = false;
 				mon.sameMoveStreak = 0;
-				if (isValidActivePosition(event.pokemon.position)) {
+				if (
+					isSideId(event.pokemon.side) &&
+					isValidActivePosition(event.pokemon.position)
+				) {
 					this.active[event.pokemon.side][event.pokemon.position] = mon.id;
 				}
 				return;
@@ -490,6 +493,7 @@ export class BattleStateTracker {
 				mon.active = false;
 				mon.hpFraction = 0;
 				mon.condition = "0 fnt";
+				if (!isSideId(event.pokemon.side)) return;
 				this.sides[event.pokemon.side].fainted += 1;
 				const slotIdx = event.pokemon.position;
 				if (isValidActivePosition(slotIdx) && this.active[event.pokemon.side][slotIdx] === mon.id) {
@@ -614,8 +618,8 @@ export class BattleStateTracker {
 				return;
 			}
 			case "sidestart": {
+				if (!isSideId(event.side)) return;
 				const ss = this.sides[event.side];
-				if (!ss) return;
 				const id = toID(event.condition);
 				switch (id) {
 					case "stealthrock": ss.stealthRock = true; break;
@@ -632,8 +636,8 @@ export class BattleStateTracker {
 				return;
 			}
 			case "sideend": {
+				if (!isSideId(event.side)) return;
 				const ss = this.sides[event.side];
-				if (!ss) return;
 				const id = toID(event.condition);
 				switch (id) {
 					case "stealthrock": ss.stealthRock = false; break;

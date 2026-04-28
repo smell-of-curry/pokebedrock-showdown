@@ -99,6 +99,15 @@ export type BattleEvent =
 	{ kind: "fail", pokemon: PokemonRef, action?: string };
 
 /**
+ * Type-guard for {@link SideId}. Used by the parser before casting any
+ * raw protocol payload into a side id, so the rest of the strategic-AI
+ * pipeline can rely on the type without duplicating the check.
+ */
+export function isSideId(value: string): value is SideId {
+	return value === "p1" || value === "p2" || value === "p3" || value === "p4";
+}
+
+/**
  * Convert a `POKEMON` reference like `p1a: Pikachu` (or `p1: Pikachu` for
  * team-preview / benched references) into a {@link PokemonRef}. Returns
  * `null` if the string doesn't match the expected format.
@@ -329,7 +338,8 @@ export function parseLine(line: string): BattleEvent | null {
 		case "-fieldend":
 			return { kind: "fieldend", condition: stripEffectPrefix(args[0] || "") };
 		case "-sidestart": {
-			const sideRaw = (args[0] || "").split(":")[0].trim() as SideId;
+			const sideRaw = (args[0] || "").split(":")[0].trim();
+			if (!isSideId(sideRaw)) return null;
 			return {
 				kind: "sidestart",
 				side: sideRaw,
@@ -337,7 +347,8 @@ export function parseLine(line: string): BattleEvent | null {
 			};
 		}
 		case "-sideend": {
-			const sideRaw = (args[0] || "").split(":")[0].trim() as SideId;
+			const sideRaw = (args[0] || "").split(":")[0].trim();
+			if (!isSideId(sideRaw)) return null;
 			return {
 				kind: "sideend",
 				side: sideRaw,
