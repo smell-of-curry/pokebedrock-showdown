@@ -192,10 +192,17 @@ export class BattleStream extends Streams.ObjectReadWriteStream<string> {
 						} :
 						null;
 
+					// @pokebedrock - Capture the pre-evolution species name so we can detect nicknames
+					const previousSpeciesName = battlePokemon.species.name;
+					const hadNickname = battlePokemon.name !== previousSpeciesName;
+
 					battlePokemon.formeChange(speciesName, sourceEffect, true);
-					// @pokebedrock - Update identity for true evolutions so protocol messages use the new name
-					(battlePokemon as any).name = speciesName;
-					(battlePokemon as any).fullname = `${battlePokemon.side.id}: ${speciesName}`;
+					// @pokebedrock - Update identity for true evolutions so protocol messages use the new name,
+					// but preserve custom nicknames (only rename if the Pokémon was using the default species name).
+					if (!hadNickname) {
+						(battlePokemon as any).name = speciesName;
+						(battlePokemon as any).fullname = `${battlePokemon.side.id}: ${speciesName}`;
+					}
 					this.battle!.sendUpdates();
 				} catch (err: any) {
 					console.warn('Error in forceforme: ' + err.message);

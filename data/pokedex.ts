@@ -16215,7 +16215,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		evoType: "other",
 		evoMinDamage: 49,
 		evoBiomes: ["Desert", "Desert Hills", "Desert Mutated"],
-		evoCondition: "Take 49+ damage without fainting, then level up in a Desert biome",
+		evoCondition: "Take 49+ damage without fainting, then walk into a Desert biome",
 		eggGroups: ["Mineral", "Amorphous"],
 	},
 	milcery: {
