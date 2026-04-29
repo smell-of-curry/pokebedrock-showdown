@@ -16949,7 +16949,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		prevo: "Stantler",
 		evoLevel: 21,
 		evoPartyForms: ["Hisui"],
-		evoCondition: "with a Hisuian-form Pokémon in party",
+		evoCondition: "Level 21 with a Hisuian-form Pokémon in party",
 		eggGroups: ["Field"],
 	},
 	kleavor: {
