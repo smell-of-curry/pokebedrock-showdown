@@ -48,6 +48,11 @@ export const RESTORATIVE_BERRIES = new Set([
 	'leppaberry', 'aguavberry', 'enigmaberry', 'figyberry', 'iapapaberry', 'magoberry', 'sitrusberry', 'wikiberry', 'oranberry',
 ] as ID[]);
 
+// @pokebedrock - Helper to narrowly strip `readonly` from select keys of `T` without
+// resorting to `as any`. Used internally by methods that legitimately need to mutate
+// fields that are otherwise `readonly` to external consumers (e.g. `updateIdentity`).
+type Mutable<T, K extends keyof T> = Omit<T, K> & { -readonly [P in K]: T[P] };
+
 export class Pokemon {
 	readonly side: Side;
 	readonly battle: Battle;
@@ -1511,6 +1516,30 @@ export class Pokemon {
 			this.knownType = true;
 			this.apparentType = this.terastallized;
 		}
+		return true;
+	}
+
+	/**
+	 * @pokebedrock
+	 * Updates the in-battle identity (`name` / `fullname`) of this Pokémon to match
+	 * a new species, while preserving custom nicknames.
+	 *
+	 * The current `this.species.name` is treated as the "pre-evolution" species name
+	 * (i.e. this must be called BEFORE `formeChange(..., isPermanent = true)`).
+	 * If the Pokémon's current `name` matches that species name, no nickname is in
+	 * use and the identity is replaced with `newSpeciesName`. Otherwise the existing
+	 * nickname is kept so downstream protocol messages (ident, switches, etc.)
+	 * continue to display the player's custom name.
+	 *
+	 * @param newSpeciesName The new species display name to adopt when no nickname is present.
+	 * @returns `true` if the identity was updated, `false` if a nickname was preserved.
+	 */
+	updateIdentity(newSpeciesName: string): boolean {
+		const hadNickname = this.name !== this.species.name;
+		if (hadNickname) return false;
+		const writable = this as Mutable<Pokemon, 'name' | 'fullname'>;
+		writable.name = newSpeciesName;
+		writable.fullname = `${this.side.id}: ${newSpeciesName}`;
 		return true;
 	}
 
