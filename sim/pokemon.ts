@@ -48,11 +48,6 @@ export const RESTORATIVE_BERRIES = new Set([
 	'leppaberry', 'aguavberry', 'enigmaberry', 'figyberry', 'iapapaberry', 'magoberry', 'sitrusberry', 'wikiberry', 'oranberry',
 ] as ID[]);
 
-// @pokebedrock - Helper to narrowly strip `readonly` from select keys of `T` without
-// resorting to `as any`. Used internally by methods that legitimately need to mutate
-// fields that are otherwise `readonly` to external consumers (e.g. `updateIdentity`).
-type Mutable<T, K extends keyof T> = Omit<T, K> & { -readonly [P in K]: T[P] };
-
 export class Pokemon {
 	readonly side: Side;
 	readonly battle: Battle;
@@ -1488,12 +1483,11 @@ export class Pokemon {
 				// Shaymin-Sky -> Shaymin
 				this.battle.add('-formechange', this, species.name, message);
 			}
-			// @pokebedrock - Include source & details for custom effects (e.g. crit evolution, and mega evolutions)
-			if (source && !['Item', 'Status', 'Ability', 'Weather', 'Terrain'].includes(source.effectType)) {
-				this.battle.add('detailschange', this, details, `[from] ${source.id}`);
-			} else {
-				this.battle.add('detailschange', this, details);
-			}
+			// @pokebedrock - Include source for custom effects (e.g. crit evolution, true evolutions);
+			// omit it for built-in effect types so vanilla mega/forme messages stay unchanged.
+			this.battle.add('detailschange', this, details,
+				source && !['Item', 'Status', 'Ability', 'Weather', 'Terrain'].includes(source.effectType) ?
+					`[from] ${source.id}` : undefined);
 		} else {
 			if (source?.effectType === 'Ability') {
 				this.battle.add('-formechange', this, species.name, message, `[from] ability: ${source.name}`);

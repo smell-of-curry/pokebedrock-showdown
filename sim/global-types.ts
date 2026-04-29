@@ -1,7 +1,11 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 
-type Mutable<T> = {
-	-readonly [P in keyof T]: T[P];
+// @pokebedrock - Extended `Mutable` to optionally accept a second type parameter `K`
+// restricting the writable keys. Used by methods that legitimately need to mutate a
+// narrow set of `readonly` fields (e.g. `Pokemon.updateIdentity`) without resorting
+// to `as any`. When `K` is omitted, behaves identically to the original full-mutable.
+type Mutable<T, K extends keyof T = keyof T> = Omit<T, K> & {
+	-readonly [P in K]: T[P];
 };
 
 type Battle = import('./battle').Battle;
