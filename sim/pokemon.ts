@@ -1483,8 +1483,11 @@ export class Pokemon {
 				// Shaymin-Sky -> Shaymin
 				this.battle.add('-formechange', this, species.name, message);
 			}
-			// @pokebedrock - Send Details changed after, so mega effect can look good.
-			this.battle.add('detailschange', this, details);
+			// @pokebedrock - Include source for custom effects (e.g. crit evolution, true evolutions);
+			// omit it for built-in effect types so vanilla mega/forme messages stay unchanged.
+			this.battle.add('detailschange', this, details,
+				source && !['Item', 'Status', 'Ability', 'Weather', 'Terrain'].includes(source.effectType) ?
+					`[from] ${source.id}` : undefined);
 		} else {
 			if (source?.effectType === 'Ability') {
 				this.battle.add('-formechange', this, species.name, message, `[from] ability: ${source.name}`);
@@ -1507,6 +1510,30 @@ export class Pokemon {
 			this.knownType = true;
 			this.apparentType = this.terastallized;
 		}
+		return true;
+	}
+
+	/**
+	 * @pokebedrock
+	 * Updates the in-battle identity (`name` / `fullname`) of this Pokémon to match
+	 * a new species, while preserving custom nicknames.
+	 *
+	 * The current `this.species.name` is treated as the "pre-evolution" species name
+	 * (i.e. this must be called BEFORE `formeChange(..., isPermanent = true)`).
+	 * If the Pokémon's current `name` matches that species name, no nickname is in
+	 * use and the identity is replaced with `newSpeciesName`. Otherwise the existing
+	 * nickname is kept so downstream protocol messages (ident, switches, etc.)
+	 * continue to display the player's custom name.
+	 *
+	 * @param newSpeciesName The new species display name to adopt when no nickname is present.
+	 * @returns `true` if the identity was updated, `false` if a nickname was preserved.
+	 */
+	updateIdentity(newSpeciesName: string): boolean {
+		const hadNickname = this.name !== this.species.name;
+		if (hadNickname) return false;
+		const writable = this as Mutable<Pokemon, 'name' | 'fullname'>;
+		writable.name = newSpeciesName;
+		writable.fullname = `${this.side.id}: ${newSpeciesName}`;
 		return true;
 	}
 

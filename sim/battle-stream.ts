@@ -192,6 +192,9 @@ export class BattleStream extends Streams.ObjectReadWriteStream<string> {
 						} :
 						null;
 
+					// @pokebedrock - Sync protocol identity with the new species while preserving nicknames.
+					// Must run before formeChange so the pre-evolution species name is still available.
+					battlePokemon.updateIdentity(speciesName);
 					battlePokemon.formeChange(speciesName, sourceEffect, true);
 					this.battle!.sendUpdates();
 				} catch (err: any) {
