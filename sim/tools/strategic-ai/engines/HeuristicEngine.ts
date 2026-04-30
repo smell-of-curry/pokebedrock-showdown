@@ -112,6 +112,20 @@ export class HeuristicEngine implements Engine {
 	// Force switch
 	// -----------------------------------------------------------------
 
+	/**
+	 * Pick a switch-in for every slot the simulator has flagged in
+	 * `forceSwitch`. The hard requirement is "every flagged slot must
+	 * answer with `switch N` for some non-active, non-fainted bench
+	 * Pokemon, or `pass` if (and only if) no such Pokemon exists" —
+	 * showdown rejects `pass` otherwise and the resulting error loop
+	 * eventually trips the host's safety valve into a forced tie.
+	 *
+	 * That means the candidate set must be built from `request.side`
+	 * directly. The tracker is only consulted to *rank* the candidates;
+	 * a missing tracker entry (e.g. on the very first force-switch of a
+	 * battle, before any move log has populated the tracker) MUST NOT
+	 * remove a Pokemon from consideration.
+	 */
 	private chooseForceSwitch(
 		request: SwitchRequest,
 		ctx: EngineContext
@@ -125,26 +139,42 @@ export class HeuristicEngine implements Engine {
 		const taken = new Set<number>();
 		const actions = slots.map(needsSwitch => {
 			if (!needsSwitch) return "pass";
-			const candidates: { req: PokemonSwitchRequestData, idx: number, mon: TrackedPokemon }[] = [];
+
+			interface RawCandidate {
+				req: PokemonSwitchRequestData;
+				idx: number;
+				mon: TrackedPokemon | null;
+			}
+
+			const candidates: RawCandidate[] = [];
 			for (let i = 0; i < side.pokemon.length; i++) {
 				const p = side.pokemon[i];
 				if (!p || p.active || p.condition.endsWith(" fnt")) continue;
 				if (taken.has(i + 1)) continue;
-				const mon = tracker ? this.resolveTrackedFromRequest(p, ctx, tracker.mySide) : null;
-				if (!mon) continue;
+				const mon = tracker ?
+					this.resolveTrackedFromRequest(p, ctx, tracker.mySide) :
+					null;
 				candidates.push({ req: p, idx: i + 1, mon });
 			}
+
+			// Genuinely no live bench mon — fine to pass.
 			if (!candidates.length) return "pass";
+
 			let pickIdx = candidates[0].idx;
 			if (tracker && foeActive) {
-				const best = chooseBestSwitch(
-					candidates.map(c => c.mon),
-					foeActive,
-					tracker
+				const ranked = candidates.filter(
+					(c): c is RawCandidate & { mon: TrackedPokemon } => !!c.mon
 				);
-				if (best) {
-					const match = candidates.find(c => c.mon.id === best.mon.id);
-					if (match) pickIdx = match.idx;
+				if (ranked.length) {
+					const best = chooseBestSwitch(
+						ranked.map(c => c.mon),
+						foeActive,
+						tracker
+					);
+					if (best) {
+						const match = ranked.find(c => c.mon.id === best.mon.id);
+						if (match) pickIdx = match.idx;
+					}
 				}
 			}
 			taken.add(pickIdx);
