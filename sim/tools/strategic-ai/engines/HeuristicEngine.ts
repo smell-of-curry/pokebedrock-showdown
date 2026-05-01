@@ -218,7 +218,13 @@ export class HeuristicEngine implements Engine {
 
 		// 1. Should we switch out?
 		const switchCandidates = this.gatherSwitchCandidates(side, slotIndex, ctx, tracker);
-		const trapped = !!active.trapped;
+		// Ability/item-based traps (Shadow Tag, Magnet Pull, Arena Trap)
+		// don't always surface as `active.trapped: true` on the request
+		// payload — the simulator only learns about them after we tried to
+		// switch and got rejected. `PlayerAI.receiveError` records the
+		// rejection in `trappedActiveByMon`; treat that as authoritative.
+		const erroredTrapped = ctx.trappedActiveByMon?.has(myMon.id) ?? false;
+		const trapped = !!active.trapped || erroredTrapped;
 		if (!trapped && switchCandidates.length > 0) {
 			const switchDecision = this.maybeSwitchOut(
 				myMon, foeMon, tracker, side, slotIndex, ctx, switchCandidates

@@ -46,6 +46,7 @@ function emptyEngineCtx(tracker) {
 		difficulty: 3,
 		lastMoveByMon: new Map(),
 		disabledMovesByMon: new Map(),
+		trappedActiveByMon: new Set(),
 		lastSwitchTurnByMon: new Map(),
 		noiseEpsilon: 0,
 		infoForgetting: 0,

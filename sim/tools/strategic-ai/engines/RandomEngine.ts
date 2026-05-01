@@ -211,7 +211,11 @@ export class RandomEngine implements Engine {
 				if (benchPoke.condition.endsWith(" fnt")) return false;
 				return true;
 			});
-			const canSwitch = active.trapped ? [] : validSwitchSlots;
+			// Honour error-fed trap flag in addition to `active.trapped`
+			// — see `EngineContext.trappedActiveByMon` for why.
+			const meId = me.uuid ?? `${side.id}|${me.ident.split(": ")[1] ?? me.ident}`;
+			const erroredTrapped = ctx.trappedActiveByMon?.has(meId) ?? false;
+			const canSwitch = (active.trapped || erroredTrapped) ? [] : validSwitchSlots;
 
 			if (
 				canSwitch.length &&

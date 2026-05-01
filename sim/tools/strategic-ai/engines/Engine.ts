@@ -38,6 +38,17 @@ export interface EngineContext {
 	lastMoveByMon: Map<string, string>;
 	/** Per-Pokemon disabled-move sets (Imprison/Disable). */
 	disabledMovesByMon: Map<string, Set<string>>;
+	/**
+	 * Per-Pokemon "is trapped" override fed by error feedback (see
+	 * `PlayerAI.receiveError`). The simulator only sets `request.active[i]
+	 * .trapped = true` when it's been told the foe revealed a trapping
+	 * effect (Mean Look, Block, etc.), but ability/item-based traps
+	 * (Shadow Tag, Magnet Pull, Arena Trap) only surface on the *next*
+	 * request after we tried to switch — leaving us looping a `switch N`
+	 * command that gets rejected. Engines should treat any mon listed
+	 * here as trapped regardless of `active.trapped`.
+	 */
+	trappedActiveByMon: Set<string>;
 	/** Per-Pokemon last switch turn. */
 	lastSwitchTurnByMon: Map<string, number>;
 	/**

@@ -128,7 +128,12 @@ export class LightHeuristicEngine implements Engine {
 		const turn = ctx.tracker?.turn ?? 0;
 
 		// 1. Switch out?
-		if (foe && !active.trapped) {
+		// Honour error-fed trap flag in addition to `active.trapped` —
+		// see `EngineContext.trappedActiveByMon`.
+		const erroredTrapped = monId ?
+			(ctx.trappedActiveByMon?.has(monId) ?? false) :
+			false;
+		if (foe && !active.trapped && !erroredTrapped) {
 			const lastSwitch = monId ? ctx.lastSwitchTurnByMon.get(monId) : undefined;
 			const canSwitch = side.pokemon.filter(p => !p.active && !p.condition.endsWith(" fnt"));
 			if (canSwitch.length && (lastSwitch === undefined || turn - lastSwitch >= SWITCH_LOCK_TURNS)) {

@@ -95,6 +95,7 @@ export class PlayerAI extends BattlePlayer {
 			difficulty: this.difficulty,
 			lastMoveByMon: new Map(),
 			disabledMovesByMon: new Map(),
+			trappedActiveByMon: new Set(),
 			lastSwitchTurnByMon: new Map(),
 			noiseEpsilon: 0,
 			infoForgetting: 0,
@@ -167,40 +168,76 @@ export class PlayerAI extends BattlePlayer {
 	/**
 	 * Catch `[Can't move] X's Y is disabled` errors and pin the disabled
 	 * move id to the specific Pokemon so it doesn't leak across switches.
+	 *
+	 * Also handles two other rejection categories that would otherwise
+	 * cycle the engine into picking the same illegal action repeatedly:
+	 *
+	 * - `[Unavailable choice] Can't switch: The active Pokémon is trapped`
+	 *   — the simulator hadn't surfaced trapping on the prior request
+	 *   (ability/item-based traps only show on the *next* request after a
+	 *   failed switch). We mark the active mon as trapped on
+	 *   `trappedActiveByMon` so the next decision skips switch candidates.
+	 *
+	 * - `[Invalid choice] Can't move: <X> doesn't have a move matching <id>`
+	 *   — a phantom move id slipped past the request's `moves[]` (forme
+	 *   change, Sleep Talk, Metronome leftover, etc.). Treat the move as
+	 *   disabled for that mon and clear `lastMoveByMon` so we don't retry it.
 	 */
 	override receiveError(error: Error): void {
-		// Anchored, non-greedy bounded character classes: avoids polynomial
-		// backtracking the lazy `(.*?)(.*?)(.*)` form would otherwise
-		// exhibit on adversarial messages while preserving the original
-		// match semantics for `[Can't move] X: Y is disabled`.
 		const m1 = /^\[([^\]]+)\] ([^:]+): (.+)$/s.exec(error.message);
 		if (!m1) return;
 		const suffix = m1[1];
 		const message = m1[3];
-		if (suffix !== "Can't move") return;
-		// Lazy `(.+?)` for the owner (allows apostrophes in names like
-		// `Farfetch'd`), anchored end + literal ` is disabled` keep the
-		// match bounded so this doesn't backtrack pathologically.
-		const m2 = /^(.+?)'s (.+) is disabled$/.exec(message);
-		if (!m2) return;
-		const monName = m2[1].trim();
-		const moveId = toID(m2[2]);
+
 		const sideId = this.tracker?.mySide ?? "p1";
-		// Engines key `disabledMovesByMon` by the same id `monIdForSlot`
-		// returns: UUID when the request exposes one, else `${sideId}|${name}`.
-		// Resolve the UUID via the tracker so the lookup matches.
-		const fallbackKey = `${sideId}|${monName}`;
-		const trackedId = this.resolveMonIdFromTracker(sideId, monName);
-		const keys = trackedId && trackedId !== fallbackKey ?
-			[trackedId, fallbackKey] :
-			[fallbackKey];
-		for (const key of keys) {
-			let set = this.engineCtx.disabledMovesByMon.get(key);
-			if (!set) {
-				set = new Set();
-				this.engineCtx.disabledMovesByMon.set(key, set);
+		const recordDisabledMove = (monName: string, moveId: string) => {
+			const fallbackKey = `${sideId}|${monName}`;
+			const trackedId = this.resolveMonIdFromTracker(sideId, monName);
+			const keys = trackedId && trackedId !== fallbackKey ?
+				[trackedId, fallbackKey] :
+				[fallbackKey];
+			for (const key of keys) {
+				let set = this.engineCtx.disabledMovesByMon.get(key);
+				if (!set) {
+					set = new Set();
+					this.engineCtx.disabledMovesByMon.set(key, set);
+				}
+				set.add(moveId);
+				if (this.engineCtx.lastMoveByMon.get(key) === moveId) {
+					this.engineCtx.lastMoveByMon.delete(key);
+				}
 			}
-			set.add(moveId);
+		};
+
+		if (suffix === "Can't move") {
+			// `<mon>'s <move> is disabled` (Imprison, Disable, Taunt, etc.).
+			const m2 = /^(.+?)'s (.+) is disabled$/.exec(message);
+			if (m2) {
+				recordDisabledMove(m2[1].trim(), toID(m2[2]));
+				return;
+			}
+			// `Your <mon> doesn't have a move matching <id>` (forme/clone
+			// out-of-sync). Same treatment as disabled.
+			const m3 = /^Your (.+?) doesn't have a move matching (.+)$/.exec(message);
+			if (m3) {
+				recordDisabledMove(m3[1].trim(), toID(m3[2]));
+				return;
+			}
+			return;
+		}
+
+		if (suffix === "Can't switch") {
+			// `The active Pokémon is trapped` — record the trap on every
+			// active mon we have for our side so the engine treats the
+			// next move request as if `active.trapped` were already set.
+			if (!/active Pok.+mon is trapped/i.test(message)) return;
+			const t = this.tracker;
+			if (!t) return;
+			for (const monId of t.active[sideId] ?? []) {
+				if (!monId) continue;
+				this.engineCtx.trappedActiveByMon.add(monId);
+			}
+			return;
 		}
 	}
 
@@ -229,6 +266,24 @@ export class PlayerAI extends BattlePlayer {
 	override receiveRequest(request: ChoiceRequest): string {
 		if (request.wait) return "";
 		this.ensureTracker(request);
+		// If the simulator now exposes `active.trapped: true` on the
+		// request itself, our error-fed override is redundant. If it does
+		// NOT but we previously recorded a trap, keep the override (the
+		// trap is still active until the foe ability/item changes). The
+		// override is cleared whenever the trapped mon switches out (its
+		// id is no longer in `tracker.active[mySide]`).
+		const t = this.tracker;
+		if (t && this.engineCtx.trappedActiveByMon.size > 0) {
+			const stillActive = new Set<string>();
+			for (const monId of t.active[t.mySide] ?? []) {
+				if (monId) stillActive.add(monId);
+			}
+			for (const trappedId of this.engineCtx.trappedActiveByMon) {
+				if (!stillActive.has(trappedId)) {
+					this.engineCtx.trappedActiveByMon.delete(trappedId);
+				}
+			}
+		}
 		return this.engine.choose(request, this.engineCtx);
 	}
 }
