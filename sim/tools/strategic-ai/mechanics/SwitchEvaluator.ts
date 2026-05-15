@@ -129,7 +129,89 @@ export function evaluateMatchup(
 		score -= foeBoosts * 4;
 	}
 
+	// Entry-synergy bonuses: things that happen the moment `mon`
+	// switches in, which the rest of the matchup math doesn't capture
+	// because it works from the *current* tracker state.
+	score += entrySynergyBonus(mon, foe, tracker);
+
 	return { score, weDealFraction, foeDealFraction, speedDelta, hazardFraction };
+}
+
+/**
+ * Score the "switching this mon in right now" effects that aren't
+ * already captured by the static matchup numbers:
+ *
+ * - **Terrain seeds** (Grassy/Electric/Misty/Psychic Seed) trigger on
+ *   entry under the matching terrain and grant a +1 stat boost. Worth
+ *   ~+10 since the boost lingers for the whole stay-in window.
+ * - **Intimidate** drops the foe's Attack on entry. Heavily valuable
+ *   against physical attackers, neutral otherwise.
+ * - **Weather setters** (Drought/Drizzle/Sand Stream/Snow Warning)
+ *   on switch-in: bonus when the weather they set differs from the
+ *   currently-active one and would benefit us (e.g. a Chlorophyll
+ *   teammate would love a sunlight setter). We approximate this as
+ *   "any new weather you bring in is mildly positive".
+ *
+ * @param mon The candidate switch-in.
+ * @param foe The foe currently on the field.
+ * @param tracker Battle state tracker.
+ * @returns A synergy bonus in roughly the [-2, +14] range.
+ */
+function entrySynergyBonus(
+	mon: TrackedPokemon,
+	foe: TrackedPokemon,
+	tracker: BattleStateTracker
+): number {
+	let bonus = 0;
+	const item = toID(mon.item);
+	const ability = toID(mon.ability);
+	const terrain = tracker.field.terrain;
+
+	// Terrain-seed entry boost. The seed is consumed on entry and grants
+	// +1 Def (Grassy/Electric) or +1 SpDef (Misty/Psychic) for the stay.
+	if (
+		(item === "grassyseed" && terrain === "grassyterrain") ||
+		(item === "electricseed" && terrain === "electricterrain") ||
+		(item === "mistyseed" && terrain === "mistyterrain") ||
+		(item === "psychicseed" && terrain === "psychicterrain")
+	) {
+		bonus += 10;
+	}
+
+	// Intimidate: foe loses one stage of Attack on our entry. Scales
+	// with how much the foe was going to lean on Attack.
+	if (ability === "intimidate") {
+		const foeAtk = foe.stats?.atk ?? 0;
+		const foeSpa = foe.stats?.spa ?? 0;
+		// Reduce by ~25% damage on physical hits → ~+6 matchup units;
+		// scale by how physical the foe looks. Pure special attackers
+		// get the floor (the lost Atk is wasted).
+		const physicalLean = foeAtk > foeSpa ? 1 : foeAtk >= foeSpa * 0.85 ? 0.5 : 0.15;
+		// Unaware on the foe ignores our Intimidate drop's offensive
+		// impact, though the stage is still applied; treat that as
+		// neutral.
+		if (toID(foe.ability) === "unaware") bonus += 0;
+		else bonus += 7 * physicalLean;
+	}
+
+	// Weather setters on entry: a switch-in that brings a *new* weather
+	// is usually a positive — either it benefits us directly or it
+	// disrupts the foe's weather-dependent strategy. Capped to +4 so
+	// it doesn't dominate the matchup math.
+	const weatherFromAbility: Record<string, string> = {
+		drought: "sunnyday",
+		drizzle: "raindance",
+		sandstream: "sandstorm",
+		snowwarning: "snowscape",
+		orichalcumpulse: "sunnyday",
+		hadronengine: "electricterrain",
+	};
+	const broughtWeather = weatherFromAbility[ability];
+	if (broughtWeather && broughtWeather !== tracker.field.weather && broughtWeather !== tracker.field.terrain) {
+		bonus += 4;
+	}
+
+	return bonus;
 }
 
 /**
@@ -159,13 +241,31 @@ export function chooseBestSwitch(
 /**
  * Find the best damaging move `attacker` can throw at `defender`.
  *
- * When `useKnownOnly` is true (foe -> us evaluation) we only consider
- * moves the foe has actually revealed; if they haven't revealed any
- * damaging moves yet, we fall back to the best STAB damage assuming
- * a 100 base-power move of each of their STAB types.
+ * We pull every revealed damaging move from the attacker's known set,
+ * AND additionally consider STAB-type proxies derived from the
+ * attacker's species. STAB types are publicly inferable from the
+ * species, so this isn't "cheating": the AI just refuses to pretend
+ * a Garchomp won't have a Ground STAB until it sees Earthquake.
  *
- * For our own evaluation we walk our actual moveset (revealedMoves
- * for our side is seeded by `applyRequest`).
+ * Without this, a foe that has only revealed one of its two STABs
+ * looks artificially safe — so on monotype teams the AI would happily
+ * switch a 4×-weak teammate into an unrevealed coverage hit.
+ *
+ * When `useKnownOnly` is false (our → foe evaluation) we additionally
+ * probe a wider coverage-type shortlist so we estimate our own
+ * unrevealed-but-likely move pool optimistically.
+ *
+ * @param attacker The CalcPokemon snapshot of the attacking side.
+ * @param defender The CalcPokemon snapshot of the defending side.
+ * @param tracker Battle state tracker (provides field / side state).
+ * @param attackerMon TrackedPokemon record for the attacker (move pool).
+ * @param defenderMon TrackedPokemon record for the defender (unused, for symmetry).
+ * @param useKnownOnly True when we're estimating the foe's threat to us:
+ *   skips the wide coverage probe but still includes STAB proxies.
+ * @param attackerSideId Tracker side id of the attacker (for screens/Tailwind).
+ * @param defenderSideId Tracker side id of the defender (for screens/Tailwind).
+ * @returns The highest expected damage roll along with the move id, or `null`
+ *   if no damaging move can be modelled (e.g. an immune defender).
  */
 function bestAttackingDamage(
 	attacker: CalcPokemon,
@@ -177,42 +277,52 @@ function bestAttackingDamage(
 	attackerSideId: SideId,
 	defenderSideId: SideId,
 ): { avgDamage: number, moveId: string } | null {
+	void defenderMon;
 	const moves: Move[] = [];
 	for (const id of attackerMon.revealedMoves) {
 		const m = Dex.moves.get(id);
 		if (m && m.category !== "Status" && m.basePower > 0) moves.push(m);
 	}
-	if (!moves.length) {
-		// Fall back to imagined STAB attacks at BP 100. We synthesise
-		// `Move`-like records via `Dex.getActiveMove` of a placeholder
-		// (Tackle) and override its `type`/`basePower` for the calc.
-		const tackleProto = Dex.moves.get("tackle");
-		for (const t of attackerMon.types) {
+	// Always add STAB proxies for the attacker's effective types — but
+	// only ones the attacker doesn't already cover with a revealed move
+	// of the same type. Species typing is public information, so
+	// assuming the mon has at least *one* damaging STAB option is safe
+	// and prevents the AI from over-trusting an incomplete revealed
+	// list. Skipping types we already see avoids double-counting
+	// (revealed Earthquake + imagined "Proxy Ground" → over-estimate).
+	const revealedTypes = new Set(moves.map(m => m.type));
+	const tackleProto = Dex.moves.get("tackle");
+	const seenProxyTypes = new Set<string>();
+	for (const t of attackerMon.types) {
+		if (seenProxyTypes.has(t) || revealedTypes.has(t)) continue;
+		seenProxyTypes.add(t);
+		// Slightly lower BP for the proxy (80) than a real STAB so the
+		// estimate is "the foe probably has *some* attack of this type"
+		// without claiming it's a guaranteed top-tier hit.
+		moves.push({
+			...tackleProto,
+			id: `proxystab${t.toLowerCase()}` as never,
+			name: `Proxy ${t}`,
+			type: t,
+			category: "Physical",
+			basePower: 80,
+			accuracy: 100,
+		});
+	}
+	if (!useKnownOnly) {
+		// Coverage moves: the most-feared off-type move. We probe a
+		// shortlist of common types; the best one wins.
+		for (const t of COMMON_COVERAGE_TYPES) {
+			if (seenProxyTypes.has(t) || revealedTypes.has(t)) continue;
 			moves.push({
 				...tackleProto,
-				id: `proxy${t.toLowerCase()}` as never,
+				id: `proxycov${t.toLowerCase()}` as never,
 				name: `Proxy ${t}`,
 				type: t,
 				category: "Physical",
-				basePower: 100,
+				basePower: 80,
 				accuracy: 100,
 			});
-		}
-		// Coverage moves: the most-feared off-type move. We probe a
-		// shortlist of common types; the best one wins.
-		if (!useKnownOnly) {
-			for (const t of COMMON_COVERAGE_TYPES) {
-				if (attackerMon.types.includes(t)) continue;
-				moves.push({
-					...tackleProto,
-					id: `proxy${t.toLowerCase()}` as never,
-					name: `Proxy ${t}`,
-					type: t,
-					category: "Physical",
-					basePower: 80,
-					accuracy: 100,
-				});
-			}
 		}
 	}
 	let best: { avgDamage: number, moveId: string } | null = null;

@@ -179,4 +179,105 @@ describe('Strategic-AI SwitchEvaluator', () => {
 				`+2 Atk Garchomp should score worse than neutral (calm=${calm.score.toFixed(2)} angry=${angry.score.toFixed(2)})`);
 		});
 	});
+
+	// Regression: a monotype Electric team forced to switch into a foe
+	// whose only revealed move is non-Ground used to happily pick a
+	// 4×-weak Ground/Flying teammate. The fix: bestAttackingDamage now
+	// always seeds STAB-type proxies for the foe so unrevealed STAB
+	// threats still register in the matchup math.
+	describe('regression: foe STAB awareness from species', () => {
+		it('prefers a Levitate teammate over a 4× Ground-weak teammate vs a Ground STAB foe', () => {
+			const tracker = freshTracker();
+			// Foe only revealed Dragon Pulse; the AI should still
+			// anticipate Earth Power because Garchomp is Ground-type.
+			const garchomp = mkTracked('Garchomp', {
+				ability: 'roughskin',
+				revealedMoves: ['dragonpulse'],
+			});
+			const magnezone = mkTracked('Magnezone', {
+				ability: 'magnetpull',
+				revealedMoves: ['thunderbolt'],
+			});
+			const rotomFan = mkTracked('Rotom-Fan', {
+				ability: 'levitate',
+				revealedMoves: ['airslash'],
+			});
+
+			const picked = chooseBestSwitch([magnezone, rotomFan], garchomp, tracker);
+			assert(picked, 'should return a chosen mon');
+			assert.equal(picked.mon.species, 'rotomfan',
+				`should prefer Rotom-Fan (Levitate) over 4× Ground-weak Magnezone ` +
+				`(picked ${picked.mon.species})`);
+		});
+
+		it('still notices a 4× weak switch-in when the foe has only revealed one STAB', () => {
+			const tracker = freshTracker();
+			// Foe (Tyranitar) has only revealed Crunch; we should still
+			// be afraid of its Rock STAB because TTar is part-Rock.
+			const ttar = mkTracked('Tyranitar', {
+				ability: 'sandstream',
+				revealedMoves: ['crunch'],
+			});
+			const charizard = mkTracked('Charizard', {
+				ability: 'blaze',
+				revealedMoves: ['flamethrower'],
+			});
+			const result = evaluateMatchup(charizard, ttar, tracker);
+			assert(result.foeDealFraction > 0.7,
+				`Should anticipate STAB Rock threat from Tyranitar even when ` +
+				`unrevealed (got ${result.foeDealFraction.toFixed(2)})`);
+		});
+	});
+
+	// Regression: the AI didn't reward terrain-seed entry synergies, so
+	// it never picked a Grassy Seed holder while Grassy Terrain was up.
+	describe('terrain-seed entry synergy', () => {
+		it('Grassy Seed holder scores higher when Grassy Terrain is active', () => {
+			const trackerNoTerrain = freshTracker();
+			const trackerGrassy = freshTracker();
+			trackerGrassy.field.terrain = 'grassyterrain';
+
+			const foe = mkTracked('Garchomp', {
+				ability: 'roughskin',
+				revealedMoves: ['earthquake'],
+			});
+			const tangrowth = mkTracked('Tangrowth', {
+				ability: 'regenerator',
+				item: 'grassyseed',
+				revealedMoves: ['gigadrain'],
+			});
+
+			const plain = evaluateMatchup(tangrowth, foe, trackerNoTerrain);
+			const synergy = evaluateMatchup(tangrowth, foe, trackerGrassy);
+			assert(synergy.score > plain.score + 5,
+				`Grassy Seed in Grassy Terrain should boost matchup score ` +
+				`(plain=${plain.score.toFixed(2)} synergy=${synergy.score.toFixed(2)})`);
+		});
+
+		it('Intimidate bonus shifts the switch decision toward the physical-foe-counter', () => {
+			const tracker = freshTracker();
+			const garchomp = mkTracked('Garchomp', {
+				ability: 'roughskin',
+				revealedMoves: ['earthquake'],
+				stats: { hp: 357, atk: 359, def: 246, spa: 222, spd: 237, spe: 333 },
+			});
+			// Two roughly comparable defensive answers; one has Intimidate.
+			const landorus = mkTracked('Landorus-Therian', {
+				ability: 'intimidate',
+				item: 'leftovers',
+				revealedMoves: ['earthquake'],
+			});
+			const gliscor = mkTracked('Gliscor', {
+				ability: 'poisonheal',
+				item: 'toxicorb',
+				revealedMoves: ['earthquake'],
+			});
+			const intim = evaluateMatchup(landorus, garchomp, tracker);
+			const plain = evaluateMatchup(gliscor, garchomp, tracker);
+			assert(intim.score > plain.score,
+				`Intimidate should score higher into a physical attacker than ` +
+				`a non-Intimidate equivalent (intim=${intim.score.toFixed(2)} ` +
+				`plain=${plain.score.toFixed(2)})`);
+		});
+	});
 });

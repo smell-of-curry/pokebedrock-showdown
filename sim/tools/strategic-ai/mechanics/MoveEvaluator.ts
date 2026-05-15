@@ -73,6 +73,14 @@ export function evaluateMove(
 	if (!m || !moveId) {
 		return { moveId, score: -Infinity, rationale: "unknown" };
 	}
+	// Counter-style moves use `damageCallback` with `basePower: 0`, so the
+	// normal damage path scores them at 0. Handle them up-front: they're
+	// only good in narrow situations (foe just hit us with the right
+	// category and we'd survive another hit), but they're game-winning
+	// when they line up.
+	if (moveId === "counter" || moveId === "mirrorcoat" || moveId === "metalburst") {
+		return evaluateCounterMove(m, moveId, ctx);
+	}
 	if (m.category === "Status") {
 		return evaluateStatus(m, moveId, ctx);
 	}
@@ -288,12 +296,29 @@ function evaluateStatus(
 		return { moveId, score, rationale: "taunt" };
 	}
 	if (moveId === "encore") {
-		score = defender.lastMove ? 14 : -5;
+		score = scoreEncore(ctx);
 		return { moveId, score, rationale: "encore" };
 	}
 	if (moveId === "disable") {
 		score = defender.lastMove ? 10 : -5;
 		return { moveId, score, rationale: "disable" };
+	}
+
+	// Destiny Bond — only worth it as a desperation trade when we expect
+	// to die this turn anyway. Showdown also rejects two DBs in a row,
+	// so refuse if our DB volatile is already up.
+	if (moveId === "destinybond") {
+		score = scoreDestinyBond(ctx);
+		return { moveId, score, rationale: "destinybond" };
+	}
+
+	// Baton Pass — pivot that *also* transfers boosts. The legacy fallback
+	// scored this at 2, so the AI would hoard boosts on one mon instead of
+	// passing them. Score is dominated by the value of the boosts being
+	// passed plus the value of our best switch target.
+	if (moveId === "batonpass") {
+		score = scoreBatonPass(ctx);
+		return { moveId, score, rationale: "batonpass" };
 	}
 
 	// Wish / Healing Wish / Memento.
@@ -327,22 +352,22 @@ function evaluateStatus(
 function isRecoveryMove(moveId: string, move: Move): boolean {
 	if (move.heal) return true;
 	switch (moveId) {
-		case "recover":
-		case "softboiled":
-		case "milkdrink":
-		case "moonlight":
-		case "morningsun":
-		case "synthesis":
-		case "roost":
-		case "shoreup":
-		case "slackoff":
-		case "rest":
+	case "recover":
+	case "softboiled":
+	case "milkdrink":
+	case "moonlight":
+	case "morningsun":
+	case "synthesis":
+	case "roost":
+	case "shoreup":
+	case "slackoff":
+	case "rest":
 		// `wish` is intentionally NOT here: it has a dedicated branch in
 		// `evaluateStatus` (delayed self-heal scoring) that would otherwise
 		// be unreachable.
-		case "healorder":
-		case "lifedew":
-			return true;
+	case "healorder":
+	case "lifedew":
+		return true;
 	}
 	return false;
 }
@@ -401,25 +426,168 @@ function scoreStatusInfliction(status: string, ctx: MoveEvalContext): number {
 	const { defender } = ctx;
 	if (defender.status) return -10; // Already statused.
 	switch (status) {
-		case "tox":
-		case "psn": {
-			if (defender.types.includes("Steel") || defender.types.includes("Poison")) return -20;
-			return 16;
-		}
-		case "brn": {
-			if (defender.types.includes("Fire")) return -20;
-			return 14;
-		}
-		case "par": {
-			if (defender.types.includes("Electric") || defender.types.includes("Ground")) return -20;
-			return ctx.weOutspeed ? 6 : 14;
-		}
-		case "slp": {
-			return 18;
-		}
-		case "frz": return 6; // Rare.
+	case "tox":
+	case "psn": {
+		if (defender.types.includes("Steel") || defender.types.includes("Poison")) return -20;
+		return 16;
+	}
+	case "brn": {
+		if (defender.types.includes("Fire")) return -20;
+		return 14;
+	}
+	case "par": {
+		if (defender.types.includes("Electric") || defender.types.includes("Ground")) return -20;
+		return ctx.weOutspeed ? 6 : 14;
+	}
+	case "slp": {
+		return 18;
+	}
+	case "frz": return 6; // Rare.
 	}
 	return 4;
+}
+
+/**
+ * Score Counter / Mirror Coat / Metal Burst.
+ *
+ * These moves are non-Status but use `damageCallback` with `basePower: 0`,
+ * so the standard damage path returns 0. They're only useful in a narrow
+ * situation: the foe just hit us with a matching attack category and
+ * we're slower (so we'll bank a hit, then strike back for 2x its damage).
+ *
+ * Metal Burst is bidirectional (works on either category) and only fires
+ * after we've taken damage that turn, so its scoring is slightly more
+ * lenient about category prediction.
+ *
+ * @param move The move definition.
+ * @param moveId The move id (`counter`, `mirrorcoat`, or `metalburst`).
+ * @param ctx The move evaluation context.
+ * @returns A `MoveEvaluation` whose `score` represents this move's utility.
+ */
+function evaluateCounterMove(
+	move: Move,
+	moveId: string,
+	ctx: MoveEvalContext
+): MoveEvaluation {
+	const { attacker, defender } = ctx;
+	// Required category that the foe must hit us with for this to fire.
+	const requiredFoeCategory: "Physical" | "Special" | "Any" =
+		moveId === "counter" ? "Physical" :
+		moveId === "mirrorcoat" ? "Special" : "Any";
+	const foeLast = defender.lastMove ? Dex.moves.get(defender.lastMove) : null;
+	const foeLastCategory = foeLast?.category;
+	// Outspeeding means we go before the foe can hit us this turn, and
+	// counters reflect "damage taken this turn" — so outspeeding makes
+	// them whiff. The move is best when we're slower.
+	const slower = !ctx.weOutspeed;
+	let score: number;
+	let rationale = moveId;
+	const matches =
+		requiredFoeCategory === "Any" ||
+		(foeLastCategory && foeLastCategory === requiredFoeCategory);
+	if (matches && slower) {
+		// Foe is committed (e.g. Choice-locked) makes this almost guaranteed.
+		score = defender.choiceLocked ? 55 : 35;
+		rationale = `${moveId}:setup`;
+	} else if (matches) {
+		score = 12;
+	} else if (foeLastCategory) {
+		// Foe just used the opposite category — predicting they'll do it
+		// again is a coin-flip; mildly negative so it's not the top pick
+		// but still considered.
+		score = -4;
+	} else {
+		// No info on the foe yet (turn 1, fresh switch-in). Modest baseline
+		// so it can outscore truly useless moves but isn't a default pick.
+		score = 4;
+	}
+	// Health gate: must survive a hit to retaliate.
+	if ((attacker.hpFraction ?? 1) < 0.25) score -= 20;
+	return { moveId, score, damage: undefined, rationale };
+}
+
+/**
+ * Score Encore. Locking the foe is best when they just used a non-damaging
+ * move (setup, status, hazard) — we deny them a damaging turn. Locking
+ * them into a damaging move they just used is mildly useful (predictability)
+ * but a wasted turn against pure attackers.
+ *
+ * @param ctx The move evaluation context.
+ * @returns The Encore utility score (~ -5..28 range).
+ */
+function scoreEncore(ctx: MoveEvalContext): number {
+	const { defender } = ctx;
+	if (!defender.lastMove) return -5;
+	if (defender.choiceLocked) return -2; // Foe is already locked into one move.
+	const lastMove = Dex.moves.get(defender.lastMove);
+	if (!lastMove?.exists) return 4;
+	if (lastMove.category === "Status") {
+		// Locking a setup or hazard mon out of attacking is huge.
+		return 28;
+	}
+	return 8;
+}
+
+/**
+ * Score Destiny Bond. Only valuable as a desperation trade: we expect
+ * to faint this turn anyway, so we take the foe with us. Showdown
+ * disallows two DBs in a row, so refuse if our DB volatile is up.
+ *
+ * @param ctx The move evaluation context.
+ * @returns The Destiny Bond utility score.
+ */
+function scoreDestinyBond(ctx: MoveEvalContext): number {
+	const { attacker } = ctx;
+	if (attacker.volatiles.has("destinybond")) return -25;
+	const myHp = attacker.hpFraction ?? 1;
+	const foeFaster = !ctx.weOutspeed;
+	// Critical HP + foe outspeeds + foe is a likely KO threat — trade.
+	if (myHp < 0.25 && foeFaster) return 55;
+	if (myHp < 0.4 && foeFaster) return 18;
+	// Healthy: DB is wasted turn (foe just keeps not attacking).
+	return -10;
+}
+
+/**
+ * Score Baton Pass.
+ *
+ * Two utility sources stack:
+ *
+ * 1. Boosts the user is currently holding (each +1 stage worth a stage-
+ *    weighted amount — same valuation as a self-boost move).
+ * 2. The matchup value of the best switch target receiving those boosts
+ *    (we don't waste BP into a 4x weak mon).
+ *
+ * Without boosts to pass and without a meaningful switch-in, BP is
+ * essentially U-turn without damage — modestly negative.
+ *
+ * @param ctx The move evaluation context.
+ * @returns The Baton Pass utility score.
+ */
+function scoreBatonPass(ctx: MoveEvalContext): number {
+	const { attacker } = ctx;
+	// Value of boosts being passed. We weight offensive stages high
+	// because that's the whole point of a BP chain; speed is also
+	// strong (Agility/Dragon Dance pass).
+	let boostValue = 0;
+	for (const [stat, raw] of Object.entries(attacker.boosts)) {
+		const stage = Math.max(0, raw);
+		if (!stage) continue;
+		const perStage = stat === "spe" ? 12 : (stat === "atk" || stat === "spa") ? 11 : 6;
+		boostValue += stage * perStage;
+	}
+	const switchValue = ctx.valueOfBestSwitch ?? 0;
+	// If we have boosts, passing them is excellent — easily dominate the
+	// fallback "+2" tier and most attacking options. Without boosts,
+	// scale by the switch value so we still consider BP as a pivot.
+	if (boostValue > 0) {
+		return boostValue + Math.max(0, switchValue) * 0.6 + 8;
+	}
+	// No boosts: BP becomes a no-damage pivot. Mildly positive only if
+	// the switch target is genuinely good and we don't have a better
+	// attacking option (the engine will compare scores).
+	if (switchValue > 8) return switchValue * 0.5;
+	return -8;
 }
 
 function hazardSetValue(ctx: MoveEvalContext, hazard: string): number {

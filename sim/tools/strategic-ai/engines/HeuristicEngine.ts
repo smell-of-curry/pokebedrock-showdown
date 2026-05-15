@@ -47,6 +47,16 @@ const SWITCH_LOCK_TURNS = 2;
 const PROTECT_CONSIDER_CHANCE = 0.15;
 /** Switch-out matchup threshold; below this, switching is favoured. */
 const SWITCH_OUT_MATCHUP = -8;
+/**
+ * Proactive-switch trigger: switch out even from a non-bad matchup if a
+ * bench mon outscores the current one by at least this much. Sized so
+ * the AI doesn't flip-flop on small numerical edges, but does take
+ * obvious synergies (e.g. Grassy Seed in Grassy Terrain, 4× resist on
+ * the bench) when they appear.
+ */
+const PROACTIVE_SWITCH_DELTA = 18;
+/** Absolute bench score required to take a proactive switch. */
+const PROACTIVE_SWITCH_FLOOR = 12;
 
 /** Lazy `Dex.moves.get`. */
 function moveOf(id: string) {
@@ -308,20 +318,33 @@ export class HeuristicEngine implements Engine {
 		const foeStats = foeMon.stats;
 		const wereFaster = (myStats?.spe ?? 0) > (foeStats?.spe ?? 0);
 
-		const wantSwitch =
-			(myHp < FAINT_THRESHOLD && !wereFaster) ||
-			matchup.score < SWITCH_OUT_MATCHUP ||
-			((myMon.boosts.atk || 0) <= -3 && (myStats?.atk ?? 0) >= (myStats?.spa ?? 0)) ||
-			((myMon.boosts.spa || 0) <= -3 && (myStats?.spa ?? 0) >= (myStats?.atk ?? 0)) ||
-			(myHp < HP_SWITCH_OUT_THRESHOLD && matchup.score < 0);
-		if (!wantSwitch) return null;
-
-		// Find best candidate.
+		// Find best candidate so we can both rank it and use it for the
+		// proactive-synergy trigger below.
 		const best = chooseBestSwitch(
 			switchCandidates.map(c => c.mon),
 			foeMon,
 			tracker
 		);
+		const bestScore = best?.score.score ?? -Infinity;
+		// Proactive: even if the current matchup isn't *bad*, a bench
+		// mon might be drastically better. Only trip this when the
+		// current matchup is at least mildly unfavourable AND a bench
+		// mon clears a large absolute floor — otherwise we just flip-
+		// flop and feed the foe free turns.
+		const proactiveSwitch =
+			matchup.score < 0 &&
+			bestScore >= PROACTIVE_SWITCH_FLOOR &&
+			bestScore - matchup.score >= PROACTIVE_SWITCH_DELTA;
+
+		const wantSwitch =
+			(myHp < FAINT_THRESHOLD && !wereFaster) ||
+			matchup.score < SWITCH_OUT_MATCHUP ||
+			((myMon.boosts.atk || 0) <= -3 && (myStats?.atk ?? 0) >= (myStats?.spa ?? 0)) ||
+			((myMon.boosts.spa || 0) <= -3 && (myStats?.spa ?? 0) >= (myStats?.atk ?? 0)) ||
+			(myHp < HP_SWITCH_OUT_THRESHOLD && matchup.score < 0) ||
+			proactiveSwitch;
+		if (!wantSwitch) return null;
+
 		if (!best) return null;
 		const slot = switchCandidates.find(c => c.mon.id === best.mon.id);
 		if (!slot) return null;
@@ -467,28 +490,28 @@ export class HeuristicEngine implements Engine {
 			.filter((m): m is TrackedPokemon => !!m);
 
 		switch (target) {
-			case "normal":
-			case "any":
-			case "adjacentFoe": {
-				const t = pickTarget({
-					tracker,
-					attacker: myMon,
-					move,
-					foeSlots: foeSlotMons,
-					allySlots: allyMons,
-				});
-				return t !== null ? `move ${idx} ${t}${suffix}` : `move ${idx}${suffix}`;
-			}
-			case "adjacentAlly":
-				return `move ${idx} -${(slotIndex ^ 1) + 1}${suffix}`;
-			case "adjacentAllyOrSelf": {
-				const allyIndex = slotIndex ^ 1;
-				const ally = (request.side).pokemon[allyIndex];
-				const allyAlive = !!ally && !ally.condition.endsWith(" fnt");
-				return `move ${idx} -${(allyAlive ? allyIndex : slotIndex) + 1}${suffix}`;
-			}
-			default:
-				return `move ${idx}${suffix}`;
+		case "normal":
+		case "any":
+		case "adjacentFoe": {
+			const t = pickTarget({
+				tracker,
+				attacker: myMon,
+				move,
+				foeSlots: foeSlotMons,
+				allySlots: allyMons,
+			});
+			return t !== null ? `move ${idx} ${t}${suffix}` : `move ${idx}${suffix}`;
+		}
+		case "adjacentAlly":
+			return `move ${idx} -${(slotIndex ^ 1) + 1}${suffix}`;
+		case "adjacentAllyOrSelf": {
+			const allyIndex = slotIndex ^ 1;
+			const ally = (request.side).pokemon[allyIndex];
+			const allyAlive = !!ally && !ally.condition.endsWith(" fnt");
+			return `move ${idx} -${(allyAlive ? allyIndex : slotIndex) + 1}${suffix}`;
+		}
+		default:
+			return `move ${idx}${suffix}`;
 		}
 	}
 
