@@ -228,4 +228,85 @@ describe('Strategic-AI MoveEvaluator', () => {
 				`Encore vs a pure attacker should be modest (got ${result.score})`);
 		});
 	});
+
+	// Regression: priority moves only earned a +25 bonus when we were
+	// slower AND would KO. Slow-mon scenarios (Mamoswine / Bisharp at
+	// low HP needing a priority KO) were underrated, and Sucker Punch
+	// was spammed into status/setup mons where it auto-fails.
+	describe('priority move scoring', () => {
+		it('Bullet Punch at low HP into a faster foe scores well above neutral', () => {
+			const tracker = freshTracker();
+			const scizor = mkTracked('Scizor', {
+				ability: 'technician', hpFraction: 0.3,
+				stats: { hp: 343, atk: 394, def: 236, spa: 138, spd: 226, spe: 195 },
+			});
+			const foe = mkTracked('Garchomp', {
+				revealedMoves: ['earthquake'],
+				stats: { hp: 357, atk: 359, def: 246, spa: 222, spd: 237, spe: 333 },
+			});
+			const priority = evaluateMove(Dex.moves.get('bulletpunch'),
+				ctxFor(scizor, foe, tracker, { weOutspeed: false }));
+			const normalAttack = evaluateMove(Dex.moves.get('xscissor'),
+				ctxFor(scizor, foe, tracker, { weOutspeed: false }));
+			// Bullet Punch should be at least competitive with the
+			// stronger X-Scissor because we may not get a second turn.
+			assert(priority.score > normalAttack.score - 5,
+				`Bullet Punch insurance bonus should make it comparable ` +
+				`to X-Scissor when low HP + slower ` +
+				`(BP=${priority.score.toFixed(2)} X=${normalAttack.score.toFixed(2)})`);
+		});
+
+		it('Extreme Speed on a slow attacker rewards the priority KO branch', () => {
+			const tracker = freshTracker();
+			const dragonite = mkTracked('Dragonite', {
+				ability: 'multiscale',
+				stats: { hp: 386, atk: 403, def: 226, spa: 212, spd: 236, spe: 185 },
+			});
+			const weakened = mkTracked('Garchomp', {
+				revealedMoves: ['earthquake'], hpFraction: 0.2,
+				stats: { hp: 357, atk: 359, def: 246, spa: 222, spd: 237, spe: 333 },
+			});
+			const result = evaluateMove(Dex.moves.get('extremespeed'),
+				ctxFor(dragonite, weakened, tracker, { weOutspeed: false }));
+			// At 20% HP a +2 priority Normal-typed STAB attack should
+			// guarantee a KO and earn the stacked-priority bonus.
+			assert(result.score > 35,
+				`Extreme Speed into a sub-20% foe should score >35 ` +
+				`(got ${result.score.toFixed(2)})`);
+		});
+	});
+
+	// Regression: Sucker Punch was being spammed against setup mons
+	// (auto-fails) and was never preferred even when the foe was
+	// choice-locked into a damaging move (guaranteed fire).
+	describe('Sucker Punch', () => {
+		it('hard-negative when the foe just used a status move', () => {
+			const tracker = freshTracker();
+			const bisharp = mkTracked('Bisharp', { ability: 'defiant' });
+			const foe = mkTracked('Volcarona', {
+				revealedMoves: ['quiverdance'],
+				lastMove: 'quiverdance',
+			});
+			const result = evaluateMove(Dex.moves.get('suckerpunch'),
+				ctxFor(bisharp, foe, tracker, { weOutspeed: false }));
+			assert(result.score < 0,
+				`Sucker Punch vs a fresh Quiver Dance user should score ` +
+				`negative — it will auto-fail (got ${result.score})`);
+		});
+
+		it('high score when the foe is choice-locked into a damaging move', () => {
+			const tracker = freshTracker();
+			const bisharp = mkTracked('Bisharp', { ability: 'defiant' });
+			const foe = mkTracked('Heatran', {
+				revealedMoves: ['magmastorm'],
+				lastMove: 'magmastorm',
+				choiceLocked: true,
+			});
+			const result = evaluateMove(Dex.moves.get('suckerpunch'),
+				ctxFor(bisharp, foe, tracker, { weOutspeed: false }));
+			assert(result.score > 25,
+				`Sucker Punch into a Choice-locked attacker should score >25 ` +
+				`(got ${result.score})`);
+		});
+	});
 });

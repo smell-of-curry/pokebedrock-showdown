@@ -134,6 +134,26 @@ export function evaluateMatchup(
 	// because it works from the *current* tracker state.
 	score += entrySynergyBonus(mon, foe, tracker);
 
+	// Survivability gate: a switch-in that will be OHKO'd by the foe's
+	// best plausible attack is a sacrifice, not a switch. The linear
+	// `foeDealFraction * 30` penalty above can be overcome by entry
+	// synergies + speed bonuses, which is how we used to swap into a
+	// 4×-weak teammate to "activate Booster Energy" and immediately
+	// faint. Stack an explicit non-linear penalty whenever the foe's
+	// best move is a likely OHKO so that path is closed off — unless
+	// the candidate brings something that compensates (priority KO,
+	// massive speed control, etc., which downstream code can still
+	// add). We also count residual hazard damage toward the OHKO
+	// threshold because the hazard tick happens before the foe's hit.
+	const survivabilityHit =
+		(foeBest?.avgDamage ?? 0) / Math.max(1, myMaxHp) +
+		hazardFraction;
+	if (survivabilityHit >= 0.95) {
+		score -= 35;
+	} else if (survivabilityHit >= 0.7) {
+		score -= 15;
+	}
+
 	return { score, weDealFraction, foeDealFraction, speedDelta, hazardFraction };
 }
 
@@ -166,6 +186,7 @@ function entrySynergyBonus(
 	const item = toID(mon.item);
 	const ability = toID(mon.ability);
 	const terrain = tracker.field.terrain;
+	const weather = tracker.field.weather;
 
 	// Terrain-seed entry boost. The seed is consumed on entry and grants
 	// +1 Def (Grassy/Electric) or +1 SpDef (Misty/Psychic) for the stay.
@@ -207,8 +228,48 @@ function entrySynergyBonus(
 		hadronengine: "electricterrain",
 	};
 	const broughtWeather = weatherFromAbility[ability];
-	if (broughtWeather && broughtWeather !== tracker.field.weather && broughtWeather !== tracker.field.terrain) {
+	if (broughtWeather && broughtWeather !== weather && broughtWeather !== terrain) {
 		bonus += 4;
+	}
+
+	// Weather-speed synergy (Chlorophyll / Swift Swim / Sand Rush /
+	// Slush Rush): when the matching weather is already active and the
+	// candidate's Speed boost would let it outspeed the current foe,
+	// reward heavily. We avoid double-counting with `scaledSpeed`'s
+	// speed-delta — this bonus targets the *decision* layer (the AI
+	// often refuses to swap a slow mon in even when the weather makes
+	// it the fastest thing on the field).
+	const weatherSpeedAbility: Record<string, (w: string) => boolean> = {
+		swiftswim: w => w === "raindance" || w === "primordialsea",
+		chlorophyll: w => w === "sunnyday" || w === "desolateland",
+		sandrush: w => w === "sandstorm",
+		slushrush: w => w === "snow" || w === "snowscape" || w === "hail",
+	};
+	if (weatherSpeedAbility[ability]?.(weather)) {
+		const baseSpe = mon.stats?.spe ?? 0;
+		const foeSpe = foe.stats?.spe ?? 0;
+		// Pre-bonus we'd have been slower; with the 2× we'd outspeed →
+		// massive tempo swing.
+		if (baseSpe <= foeSpe && baseSpe * 2 > foeSpe) bonus += 12;
+		else bonus += 4;
+	}
+
+	// Booster Energy on a Paradox mon switching into a field that
+	// won't activate the ability naturally (no sun for Protosynthesis,
+	// no Electric Terrain for Quark Drive). The held Booster Energy
+	// triggers on entry instead, granting +30%/+50% to the highest
+	// stat for the duration of the stay.
+	if (item === "boosterenergy") {
+		const isProto = ability === "protosynthesis";
+		const isQuark = ability === "quarkdrive";
+		const protoFromField = weather === "sunnyday" || weather === "desolateland";
+		const quarkFromField = terrain === "electricterrain";
+		// Only reward Booster Energy when the field wouldn't have
+		// already activated the ability — otherwise the item is just
+		// a wasted slot.
+		if ((isProto && !protoFromField) || (isQuark && !quarkFromField)) {
+			bonus += 10;
+		}
 	}
 
 	return bonus;
@@ -375,10 +436,67 @@ function scaledSpeed(mon: TrackedPokemon, tailwind: boolean, weather: string): n
 		(weather === "snow" || weather === "snowscape" || weather === "hail")) {
 		spe *= 2;
 	}
+	// Paradox speed boost when Protosynthesis/Quark Drive picks Speed
+	// as the highest stat: this is the +50% Booster-Energy / sun /
+	// electric-terrain bonus (`paradoxBoostedStat` returns `spe` only
+	// in that case).
+	if (paradoxSpeedActive(mon, weather)) spe = Math.floor(spe * 1.5);
 	if (tailwind) spe *= 2;
 	if (mon.status === "par" && ability !== "quickfeet") spe = Math.floor(spe / 2);
 	if (ability === "quickfeet" && mon.status) spe = Math.floor(spe * 1.5);
 	return spe;
+}
+
+/**
+ * Check whether the mon's Protosynthesis / Quark Drive boost is
+ * currently picking Speed. We mirror the activation logic in
+ * `DamageCalc.paradoxBoostedStat`: ability + (matching field or
+ * Booster Energy in hand or a recorded `*spe` volatile).
+ *
+ * @param mon Tracked Pokemon snapshot.
+ * @param weather Active weather id.
+ * @returns true if the Speed multiplier applies.
+ */
+function paradoxSpeedActive(mon: TrackedPokemon, weather: string): boolean {
+	const ability = toID(mon.ability);
+	if (ability !== "protosynthesis" && ability !== "quarkdrive") return false;
+	for (const v of mon.volatiles) {
+		if (v === "protosynthesisspe" || v === "quarkdrivespe") return true;
+	}
+	const item = toID(mon.item);
+	const hasBooster = item === "boosterenergy";
+	const sun = weather === "sunnyday" || weather === "desolateland";
+	const isProto = ability === "protosynthesis";
+	// Without an explicit volatile or stat block we don't know which
+	// stat the ability picks. Approximate by checking whether Speed is
+	// the species' highest base stat (the most common Paradox sweeper
+	// configuration). Conservative: returns false when in doubt.
+	if (!(isProto ? sun || hasBooster : hasBooster)) return false;
+	const stats = mon.stats;
+	if (!stats) {
+		// Fall back to a species-base-stat lookup; the Dex import is
+		// available at the top of the file.
+		const species = Dex.species.get(toID(mon.species));
+		if (!species?.exists || !species.baseStats) return false;
+		const { atk, def, spa, spd, spe } = species.baseStats;
+		return spe >= Math.max(atk, def, spa, spd);
+	}
+	const candidates: [keyof typeof stats, number][] = [
+		["atk", stats.atk ?? 0],
+		["def", stats.def ?? 0],
+		["spa", stats.spa ?? 0],
+		["spd", stats.spd ?? 0],
+		["spe", stats.spe ?? 0],
+	];
+	let best: keyof typeof stats = "atk";
+	let bestVal = -Infinity;
+	for (const [k, v] of candidates) {
+		if (v > bestVal) {
+			bestVal = v;
+			best = k;
+		}
+	}
+	return best === "spe";
 }
 
 function approximateSpeed(mon: TrackedPokemon): number {

@@ -81,6 +81,16 @@ export function evaluateMove(
 	if (moveId === "counter" || moveId === "mirrorcoat" || moveId === "metalburst") {
 		return evaluateCounterMove(m, moveId, ctx);
 	}
+	// Sucker Punch: priority physical that only fires if the foe is
+	// about to use an attacking move this turn. The normal damage path
+	// still scores its BP correctly, but we need an extra branch to
+	// avoid spamming it into setup/status mons (where it auto-fails
+	// and we lose the turn) and to *reward* it when we can predict
+	// the foe's reply will be a damaging move.
+	if (moveId === "suckerpunch") {
+		const evaluation = evaluateSuckerPunch(m, ctx);
+		if (evaluation) return evaluation;
+	}
 	if (m.category === "Status") {
 		return evaluateStatus(m, moveId, ctx);
 	}
@@ -105,16 +115,53 @@ export function evaluateMove(
 		score += 25 * calc.koProbability;
 		rationale = "likelyKO";
 	}
-	// Priority bonus: when the foe outspeeds and is in KO range, priority
-	// effectively converts a possible KO into a guaranteed one.
-	if (m.priority > 0 && !ctx.weOutspeed) {
+	// Priority bonus. Showdown priority is in [-7, +5]; almost every
+	// positive-priority move we care about sits in +1..+4 (Quick Attack,
+	// Bullet Punch, Sucker Punch, Mach Punch, Aqua Jet, Ice Shard,
+	// Extreme Speed, Fake Out, First Impression). Score them by what
+	// they actually buy us:
+	//
+	//   - Guaranteed KO when the foe would have outsped us (the big win).
+	//   - Insurance KO when our own HP is low enough that the foe's hit
+	//     would faint us before a slower move resolved.
+	//   - Chip damage that puts the foe in KO range for the bench (so
+	//     the next mon can finish them off cleanly).
+	//   - Even at full HP / outspeeding, a small baseline so the AI
+	//     doesn't ignore priority entirely on neutral matchups.
+	if (m.priority > 0) {
 		const remaining = (defender.hpFraction ?? 1) * maxHp;
-		if (calc.avgDamage >= remaining * 0.9) {
-			score += 25;
+		const myHp = attacker.hpFraction ?? 1;
+		const wouldKO = calc.avgDamage >= remaining * 0.9 || calc.koProbability > 0.5;
+		const stackedPriority = m.priority >= 2 ? 1.5 : 1;
+		if (!ctx.weOutspeed) {
+			if (wouldKO) {
+				score += 30 * stackedPriority;
+				rationale = "priorityKO";
+			} else if (myHp < 0.4) {
+				// We're slower AND fragile — a guaranteed hit is huge
+				// even if it doesn't KO, because we may not get another
+				// turn at all.
+				score += 14 * stackedPriority;
+				rationale = "priorityInsurance";
+			} else {
+				score += 6 * stackedPriority;
+			}
+		} else if (wouldKO) {
+			// Outspeeding + KO is the same outcome as a slower KO, but
+			// priority still helps if e.g. the foe is +Spe boosted or
+			// Scarfed and we mis-counted.
+			score += 8 * stackedPriority;
 			rationale = "priorityKO";
 		} else {
-			score += 5;
+			score += 3 * stackedPriority;
 		}
+		// "Chip into KO range for next mon": even if this hit doesn't
+		// KO and we're not in danger, weakening a foe so a bench
+		// sweeper finishes it next turn is real value.
+		const chipBringsKORange =
+			!wouldKO &&
+			(calc.avgDamage / Math.max(1, remaining)) >= 0.35;
+		if (chipBringsKORange) score += 4;
 	}
 	if (m.priority < 0) {
 		score -= 5;
@@ -504,6 +551,56 @@ function evaluateCounterMove(
 	// Health gate: must survive a hit to retaliate.
 	if ((attacker.hpFraction ?? 1) < 0.25) score -= 20;
 	return { moveId, score, damage: undefined, rationale };
+}
+
+/**
+ * Score Sucker Punch.
+ *
+ * The standard damage path already returns the BP-70 estimate, but it
+ * doesn't know that Sucker Punch *fails outright* unless the foe is
+ * about to use an attacking move on the same turn. We don't have a
+ * perfect predictor, but two signals are usually decisive:
+ *
+ * - Foe is **choice-locked** into a damaging move → Sucker Punch
+ *   is guaranteed to fire; treat it as the best-case priority KO.
+ * - Foe **just used** a status / setup / pivot move → Sucker Punch
+ *   has a high probability of failing this turn; large negative
+ *   score so the AI prefers literally any other move.
+ * - Otherwise: small positive baseline (mostly damage), routed back
+ *   through the normal damage path so STAB / boosts / items still
+ *   register.
+ *
+ * Returns `null` to fall through to the default damage path when no
+ * specific signal applies.
+ *
+ * @param move The Sucker Punch move definition.
+ * @param ctx The move evaluation context.
+ * @returns A `MoveEvaluation` when we have an opinion, otherwise null.
+ */
+function evaluateSuckerPunch(
+	move: Move,
+	ctx: MoveEvalContext
+): MoveEvaluation | null {
+	const { defender } = ctx;
+	const last = defender.lastMove ? Dex.moves.get(defender.lastMove) : null;
+	const lastWasStatus = last?.exists && last.category === "Status";
+	if (lastWasStatus && !defender.choiceLocked) {
+		// Foe likely sets up / heals again this turn → Sucker Punch
+		// auto-fails. Give it a hard negative score.
+		return { moveId: toID(move.id), score: -15, rationale: "suckerpunchFail" };
+	}
+	if (defender.choiceLocked && last?.exists && last.category !== "Status") {
+		// Locked into an attack → almost-guaranteed fire. Layer on the
+		// priority-KO baseline; the caller's damage path can't reach
+		// this branch but we still pay for the BP via a synthesised
+		// score (priority KO = 30 in our scale).
+		return {
+			moveId: toID(move.id),
+			score: 35,
+			rationale: "suckerpunchLockedKO",
+		};
+	}
+	return null;
 }
 
 /**

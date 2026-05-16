@@ -330,22 +330,47 @@ export class HeuristicEngine implements Engine {
 		// mon might be drastically better. Only trip this when the
 		// current matchup is at least mildly unfavourable AND a bench
 		// mon clears a large absolute floor — otherwise we just flip-
-		// flop and feed the foe free turns.
+		// flop and feed the foe free turns. The bench mon must also
+		// actually survive entry (so we don't sac into a 4× weakness
+		// for the speed/seed bonus).
+		const proactiveSurvives =
+			!best || best.score.foeDealFraction + best.score.hazardFraction < 0.9;
 		const proactiveSwitch =
 			matchup.score < 0 &&
 			bestScore >= PROACTIVE_SWITCH_FLOOR &&
-			bestScore - matchup.score >= PROACTIVE_SWITCH_DELTA;
+			bestScore - matchup.score >= PROACTIVE_SWITCH_DELTA &&
+			proactiveSurvives;
+
+		// "Don't waste a consumed-item activation": if the current mon
+		// is sitting on a fresh boost it paid for (Paradox boost from
+		// Booster Energy / matching weather/terrain, terrain-seed Def/
+		// SpD bump, Flash Fire / Charge, etc.) leaving it costs a real
+		// resource. Refuse non-emergency switches in that state.
+		const activatedBoostUp = hasActiveConsumableBoost(myMon, tracker);
+		const emergencySwitch =
+			(myHp < FAINT_THRESHOLD && !wereFaster) ||
+			((myMon.boosts.atk || 0) <= -3 && (myStats?.atk ?? 0) >= (myStats?.spa ?? 0)) ||
+			((myMon.boosts.spa || 0) <= -3 && (myStats?.spa ?? 0) >= (myStats?.atk ?? 0));
+		if (activatedBoostUp && !emergencySwitch) return null;
 
 		const wantSwitch =
-			(myHp < FAINT_THRESHOLD && !wereFaster) ||
+			emergencySwitch ||
 			matchup.score < SWITCH_OUT_MATCHUP ||
-			((myMon.boosts.atk || 0) <= -3 && (myStats?.atk ?? 0) >= (myStats?.spa ?? 0)) ||
-			((myMon.boosts.spa || 0) <= -3 && (myStats?.spa ?? 0) >= (myStats?.atk ?? 0)) ||
 			(myHp < HP_SWITCH_OUT_THRESHOLD && matchup.score < 0) ||
 			proactiveSwitch;
 		if (!wantSwitch) return null;
 
 		if (!best) return null;
+		// Sacrifice guard: refuse to "switch out" into a mon that the
+		// foe's best plausible attack would OHKO on entry. Without this
+		// the engine happily pivots a low-HP mon into a 4×-weak teammate
+		// just to set up a future swap — exactly the "swap-in, get KO'd,
+		// swap back" loop reported in playtest. Only the FAINT-emergency
+		// branch overrides this (we're already dying anyway, and the
+		// foe gets a free turn either way).
+		const candidateSurvives = best.score.foeDealFraction + best.score.hazardFraction < 0.95;
+		const isEmergency = myHp < FAINT_THRESHOLD && !wereFaster;
+		if (!candidateSurvives && !isEmergency) return null;
 		const slot = switchCandidates.find(c => c.mon.id === best.mon.id);
 		if (!slot) return null;
 		// Skill-gated: lower difficulty switches less reliably.
@@ -556,6 +581,58 @@ export class HeuristicEngine implements Engine {
 		// Fallback: synthesise a minimal record so we don't crash.
 		return null;
 	}
+}
+
+/**
+ * True if `mon` is currently enjoying a stat boost that was earned by
+ * consuming a single-use item or by entering a matching field (e.g.
+ * Booster Energy / sun on Protosynthesis, Electric Terrain on Quark
+ * Drive, Grassy/Electric/Misty/Psychic Seed in the matching terrain,
+ * Flash Fire / Charge volatile up).
+ *
+ * Switching out throws that resource away — the seed is already gone,
+ * Booster Energy was consumed on entry, etc. — so the caller uses this
+ * as a soft veto against non-emergency switches.
+ *
+ * @param mon Tracked Pokemon snapshot for the active mon.
+ * @param tracker Battle state tracker (for current field state).
+ * @returns true when a consumed-item or field-activated boost is up.
+ */
+function hasActiveConsumableBoost(
+	mon: TrackedPokemon,
+	tracker: BattleStateTracker
+): boolean {
+	for (const v of mon.volatiles) {
+		if (v.startsWith("protosynthesis") || v.startsWith("quarkdrive")) return true;
+		if (v === "flashfire" || v === "charge") return true;
+	}
+	const ability = toID(mon.ability);
+	const weather = tracker.field.weather;
+	const terrain = tracker.field.terrain;
+	const protoActive = ability === "protosynthesis" &&
+		(weather === "sunnyday" || weather === "desolateland");
+	const quarkActive = ability === "quarkdrive" && terrain === "electricterrain";
+	if (protoActive || quarkActive) return true;
+	// Terrain-seed users keep their +1 Def/SpD boost for the duration of
+	// the stay; the item has already been consumed by the time we get
+	// here, so we infer "boost up" from the boost stage matching the
+	// expected stat. Best-effort: a real Defiant trigger could also leave
+	// these stages up, but the conservatism cost is small.
+	if (
+		(terrain === "grassyterrain" || terrain === "electricterrain") &&
+		(mon.boosts.def ?? 0) > 0 &&
+		!mon.item
+	) {
+		return true;
+	}
+	if (
+		(terrain === "mistyterrain" || terrain === "psychicterrain") &&
+		(mon.boosts.spd ?? 0) > 0 &&
+		!mon.item
+	) {
+		return true;
+	}
+	return false;
 }
 
 /** Re-export the small helper consumers may want. */

@@ -618,18 +618,23 @@ function computeOffensiveStat(move: Move, input: DamageCalcInput): number {
 	const physical = isPhysicalForCalc(move, input);
 	const crit = !!input.forceCrit;
 	let baseStat: number;
+	let offensiveStatKey: keyof StatBlock;
 	if (id === "bodypress") {
+		offensiveStatKey = "def";
 		baseStat = effectiveStat(input.attacker, "def", /* ignoreNeg */ crit);
 	} else if (id === "foulplay") {
 		// Foul Play reads the defender's attack as if it were the user's,
 		// so the attacker-side crit rule (ignore negative stages) applies.
+		offensiveStatKey = "atk";
 		baseStat = effectiveStat(input.defender, "atk", /* ignoreNeg */ crit);
 	} else if (id === "photongeyser") {
 		const atk = effectiveStat(input.attacker, "atk", /* ignoreNeg */ crit);
 		const spa = effectiveStat(input.attacker, "spa", /* ignoreNeg */ crit);
+		offensiveStatKey = atk >= spa ? "atk" : "spa";
 		baseStat = Math.max(atk, spa);
 	} else {
-		baseStat = effectiveStat(input.attacker, physical ? "atk" : "spa", /* ignoreNeg */ crit);
+		offensiveStatKey = physical ? "atk" : "spa";
+		baseStat = effectiveStat(input.attacker, offensiveStatKey, /* ignoreNeg */ crit);
 	}
 	const ability = toID(input.attacker.ability);
 	if ((ability === "hugepower" || ability === "purepower") && physical) baseStat *= 2;
@@ -640,6 +645,25 @@ function computeOffensiveStat(move: Move, input: DamageCalcInput): number {
 		(move.type === "Fire" || resolveMoveType(move, input) === "Fire")
 	) {
 		baseStat *= 1.5;
+	}
+	// Solar Power: +50% Special Attack in harsh sunlight.
+	const offensiveWeather = effectiveWeather(input.field, input.attacker, input.defender);
+	if (
+		ability === "solarpower" &&
+		!physical &&
+		(offensiveWeather === "sunnyday" || offensiveWeather === "desolateland")
+	) {
+		baseStat *= 1.5;
+	}
+	// Protosynthesis (sun / Booster Energy) and Quark Drive (electric
+	// terrain / Booster Energy) grant a +30% boost (+50% to Speed) to
+	// the user's highest stat. We approximate "highest stat" from the
+	// stat block (best-known) or the species' base stats, defaulting to
+	// the offensive stat if the species lookup fails so the boost still
+	// applies in the common case.
+	const paradoxBoosted = paradoxBoostedStat(input.attacker, ability, input.field);
+	if (paradoxBoosted && paradoxBoosted === offensiveStatKey) {
+		baseStat *= paradoxBoostedMultiplier(paradoxBoosted);
 	}
 	const item = toID(input.attacker.item);
 	if (item === "choiceband" && physical) baseStat *= 1.5;
@@ -680,7 +704,105 @@ function computeDefensiveStat(move: Move, input: DamageCalcInput): number {
 	if (isSnow && stat === "def" && input.defender.types.includes("Ice")) {
 		value *= 1.5;
 	}
+	// Protosynthesis/Quark Drive defensive boost: applies whenever the
+	// defender's "highest stat" happens to be the relevant defensive
+	// stat (Def for Physical, SpD for Special / Psyshock-family).
+	const defAbility = toID(input.defender.ability);
+	const paradoxBoosted = paradoxBoostedStat(input.defender, defAbility, input.field);
+	if (paradoxBoosted && paradoxBoosted === stat) {
+		value *= paradoxBoostedMultiplier(paradoxBoosted);
+	}
 	return value;
+}
+
+/**
+ * Return the stat that a Protosynthesis / Quark Drive user is currently
+ * boosting, or `null` if the ability isn't active.
+ *
+ * The boost activates when:
+ *
+ * - **Protosynthesis** holder is in harsh sun, or holds Booster Energy
+ *   (which the mon consumes on switch-in; until the calc sees the
+ *   item as consumed we treat presence-of-item as proof it'll fire).
+ * - **Quark Drive** holder is in Electric Terrain, or holds Booster
+ *   Energy under the same logic.
+ *
+ * The boosted stat is the user's highest stat after positive stat
+ * stages (per Showdown's `getActiveProto` rule). We approximate from
+ * the best-known stat block; when none is known we fall back to the
+ * species' base stats so the boost still kicks in for foe mons whose
+ * EV spread isn't visible to us.
+ *
+ * @param mon The Pokemon snapshot to evaluate.
+ * @param ability The mon's currently-active ability id.
+ * @param field The battle field state (used for weather/terrain check).
+ * @returns The boosted stat key, or `null` when not active.
+ */
+function paradoxBoostedStat(
+	mon: CalcPokemon,
+	ability: string,
+	field: FieldState
+): keyof StatBlock | null {
+	const isProto = ability === "protosynthesis";
+	const isQuark = ability === "quarkdrive";
+	if (!isProto && !isQuark) return null;
+	// Volatile already records the boosted stat — prefer it when present.
+	// Showdown emits `|-start|...|protosynthesis|atk` etc., so the
+	// tracker stores `protosynthesisatk` / `quarkdriveatk` style ids.
+	if (mon.volatiles) {
+		for (const v of mon.volatiles) {
+			if (!v.startsWith("protosynthesis") && !v.startsWith("quarkdrive")) continue;
+			const stat = v.slice(v.startsWith("protosynthesis") ? "protosynthesis".length : "quarkdrive".length);
+			if (isStatKey(stat)) return stat;
+		}
+	}
+	const weather = field.weather;
+	const terrain = field.terrain;
+	const item = toID(mon.item);
+	const sun = weather === "sunnyday" || weather === "desolateland";
+	const eTerrain = terrain === "electricterrain";
+	const booster = item === "boosterenergy";
+	const activeForProto = isProto && (sun || booster);
+	const activeForQuark = isQuark && (eTerrain || booster);
+	if (!activeForProto && !activeForQuark) return null;
+	return highestNonHpStat(mon);
+}
+
+/**
+ * Multiplier applied by Protosynthesis / Quark Drive to the chosen
+ * stat. Speed receives a 1.5× multiplier; offensive/defensive stats
+ * receive 1.3×. The HP boost case never applies because the ability
+ * deliberately skips HP when picking its target stat.
+ *
+ * @param stat The stat key the ability boosted.
+ * @returns The multiplicative scale factor.
+ */
+function paradoxBoostedMultiplier(stat: keyof StatBlock): number {
+	if (stat === "spe") return 1.5;
+	return 1.3;
+}
+
+function highestNonHpStat(mon: CalcPokemon): keyof StatBlock {
+	const stats = ensureStats(mon);
+	// Effective post-positive-stage stats (Showdown's
+	// `getActiveProto` definition). Negative stages are ignored.
+	const keys: (keyof StatBlock)[] = ["atk", "def", "spa", "spd", "spe"];
+	let best: keyof StatBlock = "atk";
+	let bestVal = -Infinity;
+	for (const k of keys) {
+		const stage = Math.max(0, mon.boosts?.[k] || 0);
+		const base = stats[k] || 1;
+		const adjusted = stage > 0 ? Math.floor(base * (2 + stage) / 2) : base;
+		if (adjusted > bestVal) {
+			bestVal = adjusted;
+			best = k;
+		}
+	}
+	return best;
+}
+
+function isStatKey(v: string): v is keyof StatBlock {
+	return v === "hp" || v === "atk" || v === "def" || v === "spa" || v === "spd" || v === "spe";
 }
 
 /**

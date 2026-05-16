@@ -280,4 +280,105 @@ describe('Strategic-AI SwitchEvaluator', () => {
 				`plain=${plain.score.toFixed(2)})`);
 		});
 	});
+
+	// Regression: the AI happily switched in mons that would get
+	// OHKO'd on entry (4× weak teammate "just to activate Booster
+	// Energy" / sacrifice into a setup-mon to swap back). The fix
+	// stacks an explicit penalty when the foe's best move would KO
+	// the candidate.
+	describe('survivability gate', () => {
+		it('refuses to pick a 4× weak switch-in over a neutral one', () => {
+			const tracker = freshTracker();
+			// Salamence reveals only Earthquake; both candidates take
+			// neutral damage from EQ, but Mega Beedrill / Magnezone
+			// are 4× weak to either Ice Beam (special) or Earthquake.
+			const garchomp = mkTracked('Garchomp', {
+				ability: 'sandveil',
+				revealedMoves: ['earthquake', 'icebeam'],
+			});
+			// Magnezone (Electric/Steel) is 4× weak to Earthquake.
+			const magnezone = mkTracked('Magnezone', {
+				ability: 'magnetpull',
+				revealedMoves: ['flashcannon'],
+			});
+			// Skarmory (Steel/Flying) is immune to Earthquake.
+			const skarmory = mkTracked('Skarmory', {
+				ability: 'sturdy',
+				revealedMoves: ['bravebird'],
+			});
+			const picked = chooseBestSwitch([magnezone, skarmory], garchomp, tracker);
+			assert(picked, 'should return a chosen mon');
+			assert.equal(picked.mon.species, 'skarmory',
+				`should NOT pick the 4× Ground-weak Magnezone over ` +
+				`an EQ-immune Skarmory (picked ${picked.mon.species})`);
+		});
+
+		it('explicit survivability penalty drops the score when foe OHKOs', () => {
+			const tracker = freshTracker();
+			const ttar = mkTracked('Tyranitar', {
+				ability: 'sandstream',
+				revealedMoves: ['stoneedge', 'crunch'],
+			});
+			// Charizard takes ~62.5% from Stealth Rock alone (4× Rock
+			// weakness), then ~150% from Stone Edge — guaranteed OHKO.
+			const charizard = mkTracked('Charizard', {
+				ability: 'blaze',
+				revealedMoves: ['flamethrower'],
+			});
+			tracker.sides.p1.stealthRock = true;
+			const ms = evaluateMatchup(charizard, ttar, tracker);
+			assert(ms.score < -20,
+				`Charizard into TTar+SR should be deeply negative ` +
+				`(got ${ms.score.toFixed(2)})`);
+		});
+	});
+
+	// Regression: monotype team Pokemon with weather-speed abilities
+	// (Chlorophyll under sun, Swift Swim under rain, etc.) didn't
+	// receive an entry bonus, so the AI under-valued them as switch-ins
+	// even when the weather was already up.
+	describe('weather-speed synergy', () => {
+		it('Chlorophyll switch-in is preferred under sun when it outruns the foe', () => {
+			const trackerSun = freshTracker();
+			trackerSun.field.weather = 'sunnyday';
+			const trackerNoSun = freshTracker();
+			// Foe is faster than Venusaur normally (base 80 vs 80 → tie,
+			// but Garchomp has 102 base Speed → outspeeds without sun;
+			// with sun, Venusaur effectively 160 Speed → outspeeds).
+			const garchomp = mkTracked('Garchomp', {
+				revealedMoves: ['earthquake'],
+				stats: { hp: 357, atk: 359, def: 246, spa: 222, spd: 237, spe: 333 },
+			});
+			const venusaur = mkTracked('Venusaur', {
+				ability: 'chlorophyll',
+				revealedMoves: ['gigadrain'],
+				stats: { hp: 364, atk: 226, def: 226, spa: 318, spd: 318, spe: 240 },
+			});
+			const sunny = evaluateMatchup(venusaur, garchomp, trackerSun);
+			const noSun = evaluateMatchup(venusaur, garchomp, trackerNoSun);
+			assert(sunny.score > noSun.score + 5,
+				`Chlorophyll should boost matchup score under sun ` +
+				`(sun=${sunny.score.toFixed(2)} no-sun=${noSun.score.toFixed(2)})`);
+		});
+
+		it('Booster Energy holder gets an entry bonus when field will not auto-activate', () => {
+			const trackerNeutral = freshTracker();
+			const trackerTerrain = freshTracker();
+			trackerTerrain.field.terrain = 'electricterrain';
+			const foe = mkTracked('Garchomp', { revealedMoves: ['earthquake'] });
+			// Iron Valiant w/ Quark Drive + Booster Energy. On Electric
+			// Terrain it'll boost naturally; off-field, Booster Energy
+			// triggers — the entry bonus should reflect "Booster fires
+			// only when field won't already cover us".
+			const valiantBoosted = mkTracked('Iron Valiant', {
+				ability: 'quarkdrive', item: 'boosterenergy',
+				revealedMoves: ['moonblast'],
+			});
+			const neutral = evaluateMatchup(valiantBoosted, foe, trackerNeutral);
+			const onTerrain = evaluateMatchup(valiantBoosted, foe, trackerTerrain);
+			assert(neutral.score > onTerrain.score,
+				`Booster Energy entry bonus should be greater off-field ` +
+				`(neutral=${neutral.score.toFixed(2)} terrain=${onTerrain.score.toFixed(2)})`);
+		});
+	});
 });
