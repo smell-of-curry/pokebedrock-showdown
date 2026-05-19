@@ -46,6 +46,13 @@ export interface MoveEvalContext {
 	isDoubles: boolean;
 	/** Optional pre-computed value of our best switch-in for pivot scoring. */
 	valueOfBestSwitch?: number;
+	/**
+	 * True if our attacker's previous move attempt failed (missed,
+	 * blocked by immunity, blocked by Protect, etc.). Engine fills this
+	 * from `engineCtx.lastMoveFailedByMon` so power-doubling moves like
+	 * Stomping Tantrum can be scored at their boosted value.
+	 */
+	attackerLastMoveFailed?: boolean;
 }
 
 /** Result of a move evaluation. */
@@ -103,6 +110,16 @@ export function evaluateMove(
 		attackerSide: tracker.sides[ctx.mySide],
 		defenderSide: tracker.sides[ctx.foeSide],
 		isDoubles: ctx.isDoubles,
+		attackerMovesFirst: ctx.weOutspeed,
+		attackerLastMoveFailed: ctx.attackerLastMoveFailed,
+		// Approximations for conditional-BP moves where exact per-turn
+		// tracking would be expensive. Both have low false-positive
+		// cost — at worst a slightly over-scored Lash Out / Assurance.
+		attackerLostStatThisTurn: hasActiveNegativeBoost(attacker),
+		// In singles we don't track per-turn hits on the foe; leaving
+		// this `false` keeps Assurance honest (base BP) unless a future
+		// caller threads it in for doubles partner combos.
+		defenderTookDamageThisTurn: false,
 	});
 	const maxHp = calc.defenderMaxHp || estimateMaxHp(fromTracked(defender));
 	const damageScore = (calc.avgDamage / Math.max(1, maxHp)) * 100; // 0..100ish
@@ -256,22 +273,28 @@ function evaluateStatus(
 		return { moveId, score, rationale };
 	}
 
-	// Hazard moves.
+	// Hazard moves. Priority order (tuned per playtest feedback):
+	//   Sticky Web > Stealth Rock > Toxic Spikes > Spikes
+	// Sticky Web wins because the -1 Spe stage every switch-in takes
+	// reshapes the rest of the battle (a slow team suddenly outspeeds);
+	// SR is the universal chip; T-Spikes punishes grounded non-Poison
+	// foes with passive damage that compounds with switches; Spikes are
+	// last because they only fire on grounded mons and stack slowly.
+	if (moveId === "stickyweb") {
+		if (foeSideState.stickyWeb) return { moveId, score: -10, rationale: "hazardSet" };
+		return { moveId, score: hazardSetValue(ctx, "stickyweb"), rationale: "hazard:web" };
+	}
 	if (moveId === "stealthrock") {
 		if (foeSideState.stealthRock) return { moveId, score: -10, rationale: "hazardSet" };
 		return { moveId, score: hazardSetValue(ctx, "stealthrock"), rationale: "hazard:sr" };
-	}
-	if (moveId === "spikes") {
-		if (foeSideState.spikes >= 3) return { moveId, score: -10, rationale: "hazardCap" };
-		return { moveId, score: hazardSetValue(ctx, "spikes"), rationale: "hazard:spikes" };
 	}
 	if (moveId === "toxicspikes") {
 		if (foeSideState.toxicSpikes >= 2) return { moveId, score: -10, rationale: "hazardCap" };
 		return { moveId, score: hazardSetValue(ctx, "toxicspikes"), rationale: "hazard:tspikes" };
 	}
-	if (moveId === "stickyweb") {
-		if (foeSideState.stickyWeb) return { moveId, score: -10, rationale: "hazardSet" };
-		return { moveId, score: hazardSetValue(ctx, "stickyweb"), rationale: "hazard:web" };
+	if (moveId === "spikes") {
+		if (foeSideState.spikes >= 3) return { moveId, score: -10, rationale: "hazardCap" };
+		return { moveId, score: hazardSetValue(ctx, "spikes"), rationale: "hazard:spikes" };
 	}
 
 	// Hazard removal.
@@ -391,6 +414,60 @@ function evaluateStatus(
 		return { moveId, score, rationale: "trick" };
 	}
 
+	// Yawn — delayed sleep that gives the foe one turn of warning. The
+	// stall-tier value of Yawn is *forcing a switch*: the foe either
+	// stays in and falls asleep, or pivots and gives us free entry.
+	// Compounds well with Protect (burn a turn while the timer ticks)
+	// and with hazards on the foe side (any forced switch eats chip).
+	if (moveId === "yawn") {
+		if (defender.status) return { moveId, score: -10, rationale: "yawnRedundant" };
+		if (tracker.field.terrain === "electricterrain" || tracker.field.terrain === "mistyterrain") {
+			return { moveId, score: -10, rationale: "yawnTerrainBlocked" };
+		}
+		if (attacker.volatiles.has("yawn") || defender.volatiles.has("yawn")) {
+			return { moveId, score: -10, rationale: "yawnAlreadyUp" };
+		}
+		let yawnScore = 18;
+		// Stall combo: Protect lets us burn the foe's "awake" turn so
+		// sleep lands without giving them a free attack.
+		const stallMyMoves = attacker.revealedMoves;
+		const hasProtect = stallMyMoves.has("protect") ||
+			stallMyMoves.has("kingsshield") || stallMyMoves.has("spikyshield");
+		if (hasProtect) yawnScore += 8;
+		// Hazards already up on the foe side punish the forced switch.
+		const foeSideHere = tracker.sides[ctx.foeSide];
+		if (foeSideHere.stealthRock || foeSideHere.spikes || foeSideHere.stickyWeb) {
+			yawnScore += 4;
+		}
+		return { moveId, score: yawnScore, rationale: "yawn" };
+	}
+
+	// Endure — only valuable when we're holding a pinch berry / sash
+	// that we *want* to trigger, or as a desperation play with the
+	// foe outspeeding for a KO and a teammate ready to revenge.
+	if (moveId === "endure") {
+		const item = toID(attacker.item);
+		const endureHp = attacker.hpFraction ?? 1;
+		const pinchBerry =
+			item === "salacberry" || item === "liechiberry" ||
+			item === "petayaberry" || item === "ganlonberry" ||
+			item === "apicotberry";
+		if (attacker.volatiles.has("endure") || attacker.volatiles.has("protect")) {
+			return { moveId, score: -15, rationale: "endureRepeat" };
+		}
+		if (pinchBerry && endureHp < 0.6 && endureHp > 0.1) {
+			return { moveId, score: 22, rationale: "endurePinchSetup" };
+		}
+		if (item === "focussash" && endureHp > 0.95) {
+			// Sash is already going to save us; Endure is redundant.
+			return { moveId, score: -5, rationale: "endureSashRedundant" };
+		}
+		if (endureHp < 0.25 && !ctx.weOutspeed) {
+			return { moveId, score: 8, rationale: "endureDesperation" };
+		}
+		return { moveId, score: -5, rationale: "endureUnnecessary" };
+	}
+
 	// Fallback: small positive value so the AI considers exotic status moves
 	// rather than ignoring them entirely.
 	return { moveId, score: 2, rationale: "unknownStatus" };
@@ -427,23 +504,146 @@ function scoreBoostMove(
 	const boosts = move.self?.boosts ?? move.boosts ?? {};
 	const myBoosts = ctx.attacker.boosts;
 	let score = 0;
+	let anyMeaningful = false;
+	let boostsSpeed = false;
 	for (const [stat, amount] of Object.entries(boosts)) {
 		if (typeof amount !== "number") continue;
 		const cur = myBoosts[stat] || 0;
 		// Diminishing returns: +1 from 0 is more valuable than +1 from +5.
 		const incremental = amount > 0 ? Math.max(0, 6 - cur) / 6 : 1;
 		const stageValue = stat === "spe" ? 12 : (stat === "atk" || stat === "spa" ? 9 : 6);
-		score += amount * stageValue * incremental;
+		const contribution = amount * stageValue * incremental;
+		score += contribution;
+		if (contribution >= 4) anyMeaningful = true;
+		if (stat === "spe" && amount > 0 && cur < 6) boostsSpeed = true;
 	}
 	if (moveId === "bellydrum") {
 		score = (ctx.attacker.hpFraction ?? 1) >= 0.55 ? 60 : -20;
+		anyMeaningful = true;
 	}
 	if (moveId === "shellsmash") {
 		score = 35;
+		anyMeaningful = true;
+		boostsSpeed = true;
 	}
 	// Boost moves are awful when we're about to die.
 	if ((ctx.attacker.hpFraction ?? 1) < 0.25) score -= 10;
+	// Setup-window bonus: when our active mon is essentially locked
+	// in to surviving the next hit (Focus Sash @ full HP, Sturdy @
+	// full HP, Weakness Policy holder with foe revealed a SE move,
+	// Unburden holder pre-activation), double down on the setup pick
+	// instead of attacking. This is the textbook "Sash sweeper finds
+	// a free turn" / "WP setup-into-sweep" line — without the bonus
+	// the AI keeps trading hits and wastes the protection.
+	if (anyMeaningful && inSetupWindow(ctx)) {
+		score += 18;
+		// Speed-boost specifically wins the game when the setup mon
+		// is slower than the foe (or about to faint to a faster hit).
+		// The classic example is a Weakness Policy holder picking
+		// Dragon Dance / Shift Gear / Quiver Dance over Sword Dance —
+		// after the WP trigger we're +2/+2/+2 and outspeed everything
+		// in range. The extra +10 makes Speed setup decisively win
+		// over pure offensive boosts when both are on the table.
+		if (boostsSpeed && !ctx.weOutspeed) score += 10;
+	}
 	return score;
+}
+
+/**
+ * Heuristic: true when the attacker is essentially guaranteed to live
+ * through one more incoming hit this turn, even if the foe outspeeds.
+ * Used to gate setup-window bonuses (Sword Dance, Calm Mind, ...).
+ *
+ * Conditions:
+ *
+ * - Focus Sash at ≥99% HP — Sash blocks any single-hit KO from full.
+ * - Sturdy at ≥99% HP — same guarantee.
+ *
+ * Multiscale / Shadow Shield aren't included here because they only
+ * halve damage rather than block KOs; the damage calc already accounts
+ * for their multiplier when scoring attacking moves.
+ *
+ * @param ctx Move evaluation context.
+ * @returns true if the attacker is locked in to surviving the turn.
+ */
+function hasGuaranteedSurvivalThisTurn(ctx: MoveEvalContext): boolean {
+	const a = ctx.attacker;
+	const hpf = a.hpFraction ?? 1;
+	if (hpf < 0.99) return false;
+	const item = toID(a.item);
+	const ability = toID(a.ability);
+	if (item === "focussash") return true;
+	if (ability === "sturdy") return true;
+	return false;
+}
+
+/**
+ * True iff the given Pokemon is currently sitting on at least one
+ * negative stat-stage boost. Used as a coarse proxy for Lash Out's
+ * "stat lowered THIS turn" trigger — perfect tracking would need
+ * per-turn boost-deltas; this catches the common case (Intimidate
+ * switch-in, Sticky Web, foe Snarl/Charm) and only over-scores when
+ * the negative stage has been hanging around for multiple turns.
+ *
+ * @param mon The tracked Pokemon snapshot to inspect.
+ * @returns true when any boost stage in `mon.boosts` is below zero.
+ */
+function hasActiveNegativeBoost(mon: TrackedPokemon): boolean {
+	for (const v of Object.values(mon.boosts)) {
+		if (typeof v === "number" && v < 0) return true;
+	}
+	return false;
+}
+
+/**
+ * True when the attacker is in a "setup window" — i.e. it has a
+ * resource that will plausibly keep it on the field for at least one
+ * more turn even into bad damage. This generalises the original
+ * Sash / Sturdy "guaranteed survival" idea to also cover Weakness
+ * Policy bait scenarios and Unburden pre-activation.
+ *
+ * Used by {@link scoreBoostMove} to lift setup moves and by
+ * {@link hazardSetValue} to lift hazard sets (those are the two moves
+ * that *want* to fire on a turn-of-survival).
+ *
+ * @param ctx Move-eval context (attacker, defender, tracker).
+ * @returns true when the attacker should be treated as "definitely
+ *   here next turn", false otherwise.
+ */
+function inSetupWindow(ctx: MoveEvalContext): boolean {
+	if (hasGuaranteedSurvivalThisTurn(ctx)) return true;
+	const a = ctx.attacker;
+	const hpf = a.hpFraction ?? 1;
+	const item = toID(a.item);
+	const ability = toID(a.ability);
+	// Weakness Policy bait: holder lives at ≥60% HP and the foe has a
+	// revealed SE move. The WP trigger arrives next turn, granting +2
+	// Atk / +2 SpA — exactly the conditions that turn a Dragon Dance
+	// from "I hope" into "I'm sweeping".
+	if (item === "weaknesspolicy" && hpf >= 0.6) {
+		for (const moveId of ctx.defender.revealedMoves) {
+			const move = Dex.moves.get(moveId);
+			if (!move?.exists || move.category === "Status") continue;
+			let eff = 0;
+			for (const t of a.types) eff += Dex.getEffectiveness(move.type, t);
+			if (eff > 0) return true;
+		}
+	}
+	// Unburden holder still carrying a one-shot consumable. When that
+	// fires (Sash, Booster Energy, Seed, pinch berry, Sitrus, Lum) we
+	// suddenly double our Speed — the same "set up now and sweep next
+	// turn" plan as Weakness Policy.
+	if (ability === "unburden") {
+		const oneShotItems = new Set([
+			"focussash", "boosterenergy",
+			"grassyseed", "electricseed", "mistyseed", "psychicseed",
+			"salacberry", "liechiberry", "petayaberry",
+			"ganlonberry", "apicotberry", "starfberry",
+			"sitrusberry", "lumberry",
+		]);
+		if (oneShotItems.has(item)) return true;
+	}
+	return false;
 }
 
 /**
@@ -470,24 +670,52 @@ function scoreDebuffMove(move: Move, ctx: MoveEvalContext): number {
 }
 
 function scoreStatusInfliction(status: string, ctx: MoveEvalContext): number {
-	const { defender } = ctx;
+	const { defender, attacker, tracker } = ctx;
 	if (defender.status) return -10; // Already statused.
+	// "Stall combo" detection: status with a follow-up plan (Protect to
+	// burn the timer, Recover/Roost to negate the residual damage
+	// trade, a Defensive boost to outlast). When we have one of those
+	// in our revealed move set, the status is more valuable because
+	// we can capitalise on it next turn instead of letting the foe
+	// switch out cleanly.
+	const myMoves = attacker.revealedMoves;
+	const hasProtect =
+		myMoves.has("protect") || myMoves.has("kingsshield") ||
+		myMoves.has("spikyshield") || myMoves.has("banefulbunker") ||
+		myMoves.has("silktrap") || myMoves.has("burningbulwark");
+	const hasRecovery =
+		myMoves.has("recover") || myMoves.has("roost") ||
+		myMoves.has("softboiled") || myMoves.has("slackoff") ||
+		myMoves.has("milkdrink") || myMoves.has("synthesis") ||
+		myMoves.has("moonlight") || myMoves.has("morningsun") ||
+		myMoves.has("shoreup");
+	const hasDefBoost =
+		myMoves.has("irondefense") || myMoves.has("amnesia") ||
+		myMoves.has("cosmicpower") || myMoves.has("acidarmor") ||
+		myMoves.has("calmmind") || myMoves.has("bulkup");
+	const stallComboBonus = (hasProtect ? 4 : 0) + (hasRecovery ? 4 : 0) + (hasDefBoost ? 3 : 0);
 	switch (status) {
 	case "tox":
 	case "psn": {
 		if (defender.types.includes("Steel") || defender.types.includes("Poison")) return -20;
-		return 16;
+		// Misty Terrain blocks all major statuses on grounded foes;
+		// don't waste a turn trying.
+		if (tracker.field.terrain === "mistyterrain") return -10;
+		return 16 + stallComboBonus;
 	}
 	case "brn": {
 		if (defender.types.includes("Fire")) return -20;
-		return 14;
+		if (tracker.field.terrain === "mistyterrain") return -10;
+		return 14 + stallComboBonus;
 	}
 	case "par": {
 		if (defender.types.includes("Electric") || defender.types.includes("Ground")) return -20;
-		return ctx.weOutspeed ? 6 : 14;
+		if (tracker.field.terrain === "electricterrain" || tracker.field.terrain === "mistyterrain") return -10;
+		return (ctx.weOutspeed ? 6 : 14) + stallComboBonus;
 	}
 	case "slp": {
-		return 18;
+		if (tracker.field.terrain === "electricterrain" || tracker.field.terrain === "mistyterrain") return -10;
+		return 18 + stallComboBonus;
 	}
 	case "frz": return 6; // Rare.
 	}
@@ -688,13 +916,43 @@ function scoreBatonPass(ctx: MoveEvalContext): number {
 }
 
 function hazardSetValue(ctx: MoveEvalContext, hazard: string): number {
-	const { tracker, foeSide } = ctx;
+	const { tracker, foeSide, attacker } = ctx;
 	const remainingFoes = tracker.getTeam(foeSide)
 		.filter(m => !m.fainted)
 		.length;
 	if (remainingFoes <= 1) return -5;
-	let value = 6 * remainingFoes;
-	if (hazard === "stealthrock") value = 8 * remainingFoes;
+	// Per-hazard base value, sized to reflect strategic worth across
+	// the remaining foe team:
+	//   - Sticky Web: -1 Spe to every grounded switch-in (massive tempo).
+	//   - Stealth Rock: universal chip, fires on every switch incl.
+	//     Heavy-Duty Boots-less Flying / Levitate / 4× SR-weak.
+	//   - Toxic Spikes: stacking poison damage on grounded non-Poison.
+	//   - Spikes: scales by layer, slowest payoff.
+	let perFoe: number;
+	switch (hazard) {
+	case "stickyweb": perFoe = 10; break;
+	case "stealthrock": perFoe = 8; break;
+	case "toxicspikes": perFoe = 7; break;
+	default: perFoe = 6; break;
+	}
+	let value = perFoe * remainingFoes;
+	// Setup-window bonus: a Sturdy / Focus Sash user at full HP is
+	// virtually guaranteed to live this turn, so the hazard set is
+	// effectively free regardless of how the matchup looks otherwise.
+	// We also lift hazards inside the wider setup window (WP bait,
+	// Unburden pre-activation) since those mons are sticking around.
+	if (inSetupWindow(ctx)) value += 12;
+	// "Suicide hazard" play: when the active mon is going to faint
+	// regardless of what it does this turn (e.g. faster foe + foe's
+	// best move OHKOs us), a hazard set is a free farewell present to
+	// the rest of the team. Previously we *penalised* low HP here,
+	// which is exactly backwards: a Sturdy/Sash that's already broken
+	// is still going to land its move before falling, and the foe
+	// would have killed us with a damaging move either way. So we
+	// lift hazards modestly when the mon is doomed but still able to
+	// act this turn, instead of subtracting points.
+	const hpf = attacker.hpFraction ?? 1;
+	if (hpf < 0.25 && hpf > 0) value += 6;
 	return value;
 }
 

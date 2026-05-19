@@ -34,6 +34,7 @@ function mkTracked(speciesName, opts = {}) {
 		item: opts.item ?? '',
 		revealedMoves: new Set(opts.revealedMoves || []),
 		lastMove: opts.lastMove,
+		lastMoveFailed: !!opts.lastMoveFailed,
 		sameMoveStreak: opts.sameMoveStreak ?? 0,
 		choiceLocked: opts.choiceLocked ?? false,
 		stats: opts.stats,
@@ -379,6 +380,190 @@ describe('Strategic-AI SwitchEvaluator', () => {
 			assert(neutral.score > onTerrain.score,
 				`Booster Energy entry bonus should be greater off-field ` +
 				`(neutral=${neutral.score.toFixed(2)} terrain=${onTerrain.score.toFixed(2)})`);
+		});
+	});
+
+	// Regression: stall Pokemon with absorption / punish abilities
+	// (Flash Fire, Storm Drain, Water Absorb, etc.) didn't earn an
+	// extra switch-in bonus when the foe had revealed a matching move
+	// — even though the matchup is essentially "free turn + heal/boost".
+	describe('absorb/punish ability switch-in synergy', () => {
+		it('Flash Fire user is preferred over a neutral Fire-resist when foe revealed a Fire move', () => {
+			const tracker = freshTracker();
+			const heatran = mkTracked('Heatran', {
+				ability: 'flashfire',
+				revealedMoves: ['lavaplume'],
+			});
+			const garchomp = mkTracked('Garchomp', {
+				revealedMoves: ['earthquake'],
+				stats: { hp: 357, atk: 359, def: 246, spa: 222, spd: 237, spe: 333 },
+			});
+			// Charizard is a foe that has revealed Flamethrower.
+			const charizard = mkTracked('Charizard', {
+				revealedMoves: ['flamethrower'],
+				lastMove: 'flamethrower',
+				stats: { hp: 297, atk: 226, def: 226, spa: 348, spd: 248, spe: 328 },
+			});
+			const picked = chooseBestSwitch([garchomp, heatran], charizard, tracker);
+			assert(picked, 'should return a chosen mon');
+			assert.equal(picked.mon.species, 'heatran',
+				`should pick Flash Fire Heatran over Garchomp into a ` +
+				`revealed-Flamethrower foe (picked ${picked.mon.species})`);
+		});
+
+		it('Water Absorb user beats a generic Water-resist when foe revealed Surf', () => {
+			const tracker = freshTracker();
+			const vaporeon = mkTracked('Vaporeon', {
+				ability: 'waterabsorb',
+				revealedMoves: ['scald'],
+			});
+			const ferrothorn = mkTracked('Ferrothorn', {
+				ability: 'ironbarbs',
+				revealedMoves: ['powerwhip'],
+			});
+			const milotic = mkTracked('Milotic', {
+				revealedMoves: ['surf'],
+				lastMove: 'surf',
+			});
+			const picked = chooseBestSwitch([ferrothorn, vaporeon], milotic, tracker);
+			assert(picked, 'should return a chosen mon');
+			assert.equal(picked.mon.species, 'vaporeon',
+				`should pick Water Absorb Vaporeon over Grass-resist Ferrothorn ` +
+				`(picked ${picked.mon.species})`);
+		});
+
+		it('Levitate user gets the absorb bonus into a foe with a Ground move revealed', () => {
+			const tracker = freshTracker();
+			// Two equally-OK Ground-resisters; Bronzong has Levitate.
+			const bronzong = mkTracked('Bronzong', {
+				ability: 'levitate',
+				revealedMoves: ['psychic'],
+			});
+			const skarmory = mkTracked('Skarmory', {
+				ability: 'sturdy',
+				revealedMoves: ['bravebird'],
+			});
+			const garchomp = mkTracked('Garchomp', {
+				revealedMoves: ['earthquake'],
+				lastMove: 'earthquake',
+			});
+			const bronzScore = evaluateMatchup(bronzong, garchomp, tracker);
+			const skarmScore = evaluateMatchup(skarmory, garchomp, tracker);
+			// Both are immune to EQ via ability/type, so this isn't a
+			// damage delta — the absorb-bonus is what distinguishes them.
+			assert(bronzScore.score >= skarmScore.score - 1,
+				`Levitate Bronzong should be at least as attractive as ` +
+				`Steel/Flying Skarmory into Garchomp (bronz=${bronzScore.score.toFixed(2)}, ` +
+				`skarm=${skarmScore.score.toFixed(2)})`);
+		});
+
+		it('does not bonus an absorb ability when the foe has not revealed a matching move', () => {
+			const tracker = freshTracker();
+			const heatran = mkTracked('Heatran', {
+				ability: 'flashfire',
+				revealedMoves: ['lavaplume'],
+			});
+			const blissey = mkTracked('Blissey', {
+				revealedMoves: ['softboiled'],
+			});
+			const ms = evaluateMatchup(heatran, blissey, tracker);
+			// Score should be a normal matchup, not artificially boosted
+			// by Flash Fire because Blissey has no revealed Fire moves.
+			assert(ms.score < 30,
+				`Flash Fire absorb bonus should NOT apply without a ` +
+				`revealed Fire move on the foe (score=${ms.score.toFixed(2)})`);
+		});
+	});
+
+	// Regression: emergency / dominant-outspeeder checks in the
+	// HeuristicEngine used raw `stats.spe` while the matchup scorer
+	// used `scaledSpeed` (with Swift Swim / Tailwind / Paradox etc).
+	// They are now exported from SwitchEvaluator and the speed predicate
+	// is required to agree across both layers.
+	describe('scaledSpeed exposes weather/paradox/tailwind multipliers', () => {
+		const { scaledSpeed } = require(
+			'../../../../dist/sim/tools/strategic-ai/mechanics/SwitchEvaluator'
+		);
+
+		it('Swift Swim doubles Speed in rain', () => {
+			const barraskewda = mkTracked('Barraskewda', {
+				ability: 'swiftswim',
+				stats: { hp: 286, atk: 348, def: 175, spa: 154, spd: 145, spe: 421 },
+			});
+			const dry = scaledSpeed(barraskewda, false, '');
+			const wet = scaledSpeed(barraskewda, false, 'raindance');
+			assert.equal(wet, dry * 2,
+				`Swift Swim in rain should double Speed ` +
+				`(dry=${dry} wet=${wet})`);
+		});
+
+		it('Chlorophyll doubles Speed in sun', () => {
+			const venusaur = mkTracked('Venusaur', {
+				ability: 'chlorophyll',
+				stats: { hp: 364, atk: 232, def: 247, spa: 290, spd: 287, spe: 246 },
+			});
+			const dry = scaledSpeed(venusaur, false, '');
+			const hot = scaledSpeed(venusaur, false, 'sunnyday');
+			assert.equal(hot, dry * 2,
+				`Chlorophyll in sun should double Speed ` +
+				`(dry=${dry} hot=${hot})`);
+		});
+
+		it('Tailwind doubles Speed regardless of weather', () => {
+			const lugia = mkTracked('Lugia', {
+				stats: { hp: 416, atk: 207, def: 318, spa: 248, spd: 339, spe: 251 },
+			});
+			const noTW = scaledSpeed(lugia, false, '');
+			const yesTW = scaledSpeed(lugia, true, '');
+			assert.equal(yesTW, noTW * 2,
+				`Tailwind should double Speed (noTW=${noTW} yesTW=${yesTW})`);
+		});
+
+		it('Paralysis halves Speed (unless Quick Feet)', () => {
+			const me = mkTracked('Garchomp', {
+				ability: 'roughskin', status: 'par',
+				stats: { hp: 357, atk: 359, def: 246, spa: 222, spd: 237, spe: 333 },
+			});
+			const quick = mkTracked('Linoone', {
+				ability: 'quickfeet', status: 'par',
+				stats: { hp: 281, atk: 248, def: 196, spa: 156, spd: 196, spe: 250 },
+			});
+			const me0 = scaledSpeed(me, false, '');
+			const quick0 = scaledSpeed(quick, false, '');
+			assert(me0 < 333,
+				`Paralysis should halve Speed (got ${me0} for 333 base)`);
+			assert(quick0 > 250,
+				`Quick Feet + status should *raise* Speed (got ${quick0})`);
+		});
+	});
+
+	// Regression: Weakness Policy mons should be willing to "tank a
+	// SE hit on purpose" to trigger the +2 Atk / +2 SpA boost.
+	describe('Weakness Policy bait synergy', () => {
+		it('WP holder scores higher into a foe that has revealed a SE move', () => {
+			const tracker = freshTracker();
+			// Dragonite (Weakness Policy) into a foe with a revealed
+			// Ice attack — WP will trigger from the SE hit.
+			const dragonite = mkTracked('Dragonite', {
+				ability: 'multiscale',
+				item: 'weaknesspolicy',
+				revealedMoves: ['extremespeed', 'dragonclaw'],
+			});
+			const weavile = mkTracked('Weavile', {
+				revealedMoves: ['icepunch'],
+				lastMove: 'icepunch',
+			});
+			const dragonite2 = mkTracked('Dragonite', {
+				ability: 'multiscale',
+				item: 'leftovers',
+				revealedMoves: ['extremespeed', 'dragonclaw'],
+			});
+			const wp = evaluateMatchup(dragonite, weavile, tracker);
+			const leftovers = evaluateMatchup(dragonite2, weavile, tracker);
+			assert(wp.score > leftovers.score + 3,
+				`Weakness Policy Dragonite should score higher into a ` +
+				`revealed Ice attacker than the Leftovers version ` +
+				`(wp=${wp.score.toFixed(2)} lo=${leftovers.score.toFixed(2)})`);
 		});
 	});
 });

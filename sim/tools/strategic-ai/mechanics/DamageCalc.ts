@@ -124,6 +124,37 @@ export interface DamageCalcInput {
 	 * `Dex.gen`.
 	 */
 	gen?: number;
+	/**
+	 * True when the attacker is expected to move before the defender
+	 * this turn. Used by power-doubling moves whose effect depends on
+	 * turn order: Bolt Beak / Fishious Rend (`true` → 2× BP), Payback /
+	 * Revenge / Avalanche (`false` → 2× BP), Assurance (foe took damage
+	 * this turn → 2× BP, approximated downstream by combining this with
+	 * `defenderTookDamageThisTurn`).
+	 *
+	 * Falsy (undefined) means "unknown"; the calc falls back to neutral
+	 * scaling (no boost, no penalty).
+	 */
+	attackerMovesFirst?: boolean;
+	/**
+	 * True when the attacker's previous successful move attempt failed
+	 * (missed / immune / blocked). Used by Stomping Tantrum (2× BP) so
+	 * the AI sequences "Earthquake against Levitate → Stomping Tantrum"
+	 * intentionally instead of treating the first turn as a sunk loss.
+	 */
+	attackerLastMoveFailed?: boolean;
+	/**
+	 * True when one of the attacker's stat stages was lowered this turn
+	 * (Intimidate switch-in, Sticky Web entry, foe Sword Dance, etc.).
+	 * Used by Lash Out (2× BP).
+	 */
+	attackerLostStatThisTurn?: boolean;
+	/**
+	 * True when the defender has already been hit by another move this
+	 * turn (doubles partner, prior multi-hit, etc.). Used by Assurance
+	 * (2× BP).
+	 */
+	defenderTookDamageThisTurn?: boolean;
 }
 
 /** Output of {@link calculateDamage}. */
@@ -174,6 +205,16 @@ export function calculateDamage(input: DamageCalcInput): DamageRange {
 	const move = typeof input.move === "string" ? Dex.moves.get(input.move) : input.move;
 	const moveId = toID(move.id || (move as { name: string }).name || "");
 	const defenderHp = estimateMaxHp(input.defender);
+	// Always-crit moves (Wicked Blow, Surging Strikes, Flower Trick,
+	// Storm Throw, Frost Breath, Zippy Zap, ...) carry `willCrit: true`
+	// in dex data. Auto-promote them to `forceCrit` so callers don't
+	// have to know which moves are guaranteed: a Wicked Blow into a
+	// +6 Iron Defense Cosmoem still does its full chip because crit
+	// ignores foe positive Def stages (see `effectiveStat`).
+	const guaranteedCrit = move && (move as { willCrit?: boolean }).willCrit === true;
+	if (guaranteedCrit && !input.forceCrit) {
+		input = { ...input, forceCrit: true };
+	}
 	const baseRange: DamageRange = {
 		minDamage: 0,
 		avgDamage: 0,
@@ -544,8 +585,46 @@ function computeBasePower(move: Move, moveType: string, input: DamageCalcInput):
 			break;
 		case "boltbeak":
 		case "fishiousrend":
-			// We don't know move order; approximate as 50% chance of doubling.
-			bp *= 1.5;
+			// 2× if the attacker moves first this turn — we now have
+			// the hint from the caller. When the hint is missing
+			// (`undefined`), fall back to the historical 1.5× midpoint
+			// estimate rather than guess wrong either way.
+			if (input.attackerMovesFirst === true) bp *= 2;
+			else if (input.attackerMovesFirst === undefined) bp *= 1.5;
+			break;
+		case "payback":
+			// 2× if the attacker moves second.
+			if (input.attackerMovesFirst === false) bp *= 2;
+			break;
+		case "revenge":
+		case "avalanche":
+			// 2× if the attacker took damage from the foe this turn.
+			// We approximate that as "foe moves first" — the typical
+			// scenario where Revenge / Avalanche actually fire. (False
+			// positives in the unusual "foe used a status move first
+			// turn" case are tolerable; the scoring layer cross-checks
+			// `defender.lastMove?.category` for the higher-value
+			// branches.)
+			if (input.attackerMovesFirst === false) bp *= 2;
+			break;
+		case "assurance":
+			// 2× if the target has already taken damage this turn —
+			// classic doubles partner combo, or any prior hit on the
+			// same target in singles (multi-hit interruption, etc.).
+			if (input.defenderTookDamageThisTurn) bp *= 2;
+			break;
+		case "lashout":
+			// 2× if the attacker's stat stages were lowered this turn
+			// (Intimidate switch-in, Sticky Web, foe Sword Dance/Snarl).
+			if (input.attackerLostStatThisTurn) bp *= 2;
+			break;
+		case "stompingtantrum":
+			// 2× if the user's *previous* move failed. The engine sets
+			// this flag from `lastMoveFailedByMon` (LogParser feeds it
+			// from `|miss|` / `|-immune|` / `|cant|` events). The
+			// classic "Earthquake into Levitate → Stomping Tantrum"
+			// combo finally scores correctly.
+			if (input.attackerLastMoveFailed) bp *= 2;
 			break;
 		case "lastrespects":
 			// Scales with team faints; approximate with +1 per faint.

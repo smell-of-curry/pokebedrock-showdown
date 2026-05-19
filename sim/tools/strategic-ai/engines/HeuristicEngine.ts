@@ -31,7 +31,7 @@ import type {
 } from "../../../side";
 import { calculateDamage, fromTracked } from "../mechanics/DamageCalc";
 import { evaluateMove, type MoveEvalContext } from "../mechanics/MoveEvaluator";
-import { chooseBestSwitch, evaluateMatchup } from "../mechanics/SwitchEvaluator";
+import { chooseBestSwitch, evaluateMatchup, scaledSpeed } from "../mechanics/SwitchEvaluator";
 import { pickTarget } from "../mechanics/TargetPicker";
 import { chooseTransform } from "../mechanics/TransformPolicy";
 import type { BattleStateTracker, TrackedPokemon } from "../state/BattleStateTracker";
@@ -237,7 +237,7 @@ export class HeuristicEngine implements Engine {
 		const trapped = !!active.trapped || erroredTrapped;
 		if (!trapped && switchCandidates.length > 0) {
 			const switchDecision = this.maybeSwitchOut(
-				myMon, foeMon, tracker, side, slotIndex, ctx, switchCandidates
+				myMon, foeMon, tracker, side, slotIndex, ctx, switchCandidates, active
 			);
 			if (switchDecision) {
 				if (monId) ctx.lastSwitchTurnByMon.set(monId, tracker.turn);
@@ -270,6 +270,10 @@ export class HeuristicEngine implements Engine {
 			valueOfBestSwitch: switchCandidates.length ?
 				this.bestSwitchValue(switchCandidates, foeMon, tracker) :
 				0,
+			// Plumb "did our last attempt fizzle?" through to the move
+			// scorer. This lets Stomping Tantrum's 2× BP fire after
+			// e.g. an Earthquake into Levitate the previous turn.
+			attackerLastMoveFailed: myMon.lastMoveFailed,
 		};
 
 		const scored = this.scoreCandidates(availableMoves, evalCtx, ctx);
@@ -306,7 +310,8 @@ export class HeuristicEngine implements Engine {
 		side: SideRequestData,
 		slotIndex: number,
 		ctx: EngineContext,
-		switchCandidates: { req: PokemonSwitchRequestData, idx: number, mon: TrackedPokemon }[]
+		switchCandidates: { req: PokemonSwitchRequestData, idx: number, mon: TrackedPokemon }[],
+		active: PokemonMoveRequestData
 	): string | null {
 		const monId = this.monIdForSlot(side, slotIndex, ctx);
 		const lastSwitch = monId ? ctx.lastSwitchTurnByMon.get(monId) : undefined;
@@ -315,8 +320,17 @@ export class HeuristicEngine implements Engine {
 		const myHp = myMon.hpFraction ?? 1;
 		const matchup = evaluateMatchup(myMon, foeMon, tracker);
 		const myStats = myMon.stats;
-		const foeStats = foeMon.stats;
-		const wereFaster = (myStats?.spe ?? 0) > (foeStats?.spe ?? 0);
+		// Use `scaledSpeed` (weather doubled / Tailwind / boosts / status)
+		// so emergency / dominant-outspeeder checks match the matchup
+		// scorer. Without this, a Swift Swim user in rain reads as
+		// "slower" for emergency logic but "faster" for matchup logic
+		// — exactly the bug behind the Mega-Sceptile vs Pelipper /
+		// Barraskewda misfire reported in playtest.
+		const myTailwind = tracker.sides[tracker.mySide].tailwindTurns > 0;
+		const foeTailwind = tracker.sides[tracker.foeSide].tailwindTurns > 0;
+		const myEff = scaledSpeed(myMon, myTailwind, tracker.field.weather);
+		const foeEff = scaledSpeed(foeMon, foeTailwind, tracker.field.weather);
+		const wereFaster = tracker.field.trickRoom ? myEff < foeEff : myEff > foeEff;
 
 		// Find best candidate so we can both rank it and use it for the
 		// proactive-synergy trigger below.
@@ -341,17 +355,41 @@ export class HeuristicEngine implements Engine {
 			bestScore - matchup.score >= PROACTIVE_SWITCH_DELTA &&
 			proactiveSurvives;
 
+		const emergencySwitch =
+			(myHp < FAINT_THRESHOLD && !wereFaster) ||
+			((myMon.boosts.atk || 0) <= -3 && (myStats?.atk ?? 0) >= (myStats?.spa ?? 0)) ||
+			((myMon.boosts.spa || 0) <= -3 && (myStats?.spa ?? 0) >= (myStats?.atk ?? 0));
+
 		// "Don't waste a consumed-item activation": if the current mon
 		// is sitting on a fresh boost it paid for (Paradox boost from
 		// Booster Energy / matching weather/terrain, terrain-seed Def/
 		// SpD bump, Flash Fire / Charge, etc.) leaving it costs a real
 		// resource. Refuse non-emergency switches in that state.
-		const activatedBoostUp = hasActiveConsumableBoost(myMon, tracker);
-		const emergencySwitch =
-			(myHp < FAINT_THRESHOLD && !wereFaster) ||
-			((myMon.boosts.atk || 0) <= -3 && (myStats?.atk ?? 0) >= (myStats?.spa ?? 0)) ||
-			((myMon.boosts.spa || 0) <= -3 && (myStats?.spa ?? 0) >= (myStats?.atk ?? 0));
-		if (activatedBoostUp && !emergencySwitch) return null;
+		if (hasActiveConsumableBoost(myMon, tracker) && !emergencySwitch) return null;
+
+		// Setup-window preservation: a fresh Focus Sash / Sturdy mon
+		// at full HP is locked in to one more turn no matter how scary
+		// the matchup looks; pivoting away wastes the protection. Same
+		// logic for Weakness Policy when the foe's revealed kit
+		// includes a SE attack (the WP will fire, we get +2/+2).
+		if (shouldPreserveSetupWindow(myMon, foeMon) && !emergencySwitch) return null;
+
+		// Already-dominant: if we outspeed AND can already pressure the
+		// foe meaningfully (>= 25% per swing) AND we're not low HP,
+		// proactive switching just throws tempo away. The user's
+		// playtests showed flip-flop swaps from healthy outspeeding
+		// mons; this guard closes that branch.
+		const weDealMeaningful = matchup.weDealFraction >= 0.25;
+		if (wereFaster && weDealMeaningful && myHp >= 0.5 && matchup.score >= 0) return null;
+
+		// "We can clean up with priority next turn": refuse to swap into
+		// a healthy teammate (almost always a sacrifice setup) when our
+		// current mon has a usable priority move that would KO the foe.
+		// Even if the matchup score says "you're losing", the actual
+		// outcome is "we KO before they move" → we don't need a swap.
+		if (this.hasUsablePriorityKO(myMon, foeMon, tracker, active, ctx) && !emergencySwitch) {
+			return null;
+		}
 
 		const wantSwitch =
 			emergencySwitch ||
@@ -370,6 +408,24 @@ export class HeuristicEngine implements Engine {
 		// foe gets a free turn either way).
 		const candidateSurvives = best.score.foeDealFraction + best.score.hazardFraction < 0.95;
 		const isEmergency = myHp < FAINT_THRESHOLD && !wereFaster;
+		// Stay-and-sac gate: when the *current* mon is already going to
+		// faint to the foe's best plausible attack this turn (foe is
+		// faster and OHKOs us, or we're a doomed Sash/Sturdy) AND the
+		// best switch-in would also eat heavy chip on entry, staying
+		// is the correct play — we get one more attack / hazard / status
+		// for free instead of throwing a fresh mon into the same shot.
+		//
+		// The textbook scenario is the Mega-Sceptile (+2 SD) vs Pelipper
+		// (Drizzle) / Barraskewda (Swift Swim) line: Pelipper is dead
+		// either way, and pivoting Barraskewda in straight into Leaf
+		// Storm wastes the cleaner. Sac Pelipper, send Barraskewda on
+		// a free turn.
+		const wereDying = !wereFaster &&
+			matchup.foeDealFraction >= 0.9 &&
+			!hasGuaranteedSurvivalForActive(myMon);
+		const candidateAlsoChipped =
+			best.score.foeDealFraction + best.score.hazardFraction >= 0.7;
+		if (wereDying && candidateAlsoChipped && !emergencySwitch) return null;
 		if (!candidateSurvives && !isEmergency) return null;
 		const slot = switchCandidates.find(c => c.mon.id === best.mon.id);
 		if (!slot) return null;
@@ -377,6 +433,46 @@ export class HeuristicEngine implements Engine {
 		const skill = Math.max(0, Math.min(1, (ctx.difficulty - 1) / 4));
 		if (ctx.prng.random() > skill) return null;
 		return `switch ${slot.idx}`;
+	}
+
+	/**
+	 * True iff the active mon has a usable (PP > 0, not disabled,
+	 * non-status) positive-priority move that has a high probability of
+	 * KOing the current foe on the next turn. Used by the switch-out
+	 * gate to refuse pivots when we're already a one-turn-KO threat.
+	 *
+	 * @param myMon Tracked current mon.
+	 * @param foeMon Tracked foe active.
+	 * @param tracker Battle state tracker.
+	 * @param active Request payload for the active slot (move PP/lock).
+	 * @param ctx Engine context (for per-mon disabled-move set).
+	 * @returns true when at least one priority move probably KOs.
+	 */
+	private hasUsablePriorityKO(
+		myMon: TrackedPokemon,
+		foeMon: TrackedPokemon,
+		tracker: BattleStateTracker,
+		active: PokemonMoveRequestData,
+		ctx: EngineContext
+	): boolean {
+		const monDisabled = ctx.disabledMovesByMon.get(myMon.id);
+		for (const m of active.moves) {
+			if (m.disabled || m.pp === 0) continue;
+			if (monDisabled?.has(m.id)) continue;
+			const move = moveOf(m.id);
+			if (!move?.exists || move.category === "Status") continue;
+			if ((move.priority ?? 0) <= 0) continue;
+			const calc = calculateDamage({
+				attacker: fromTracked(myMon),
+				defender: fromTracked(foeMon),
+				move,
+				field: tracker.field,
+				attackerSide: tracker.sides[tracker.mySide],
+				defenderSide: tracker.sides[tracker.foeSide],
+			});
+			if (calc.koProbability > 0.6) return true;
+		}
+		return false;
 	}
 
 	/**
@@ -633,6 +729,90 @@ function hasActiveConsumableBoost(
 		return true;
 	}
 	return false;
+}
+
+/**
+ * True when the current mon is sitting on a setup-window resource that
+ * a switch-out would waste. We're conservative on purpose: only flag
+ * cases where the resource is *about* to pay off this very turn, so
+ * the engine doesn't lock itself into a doomed mon just because it
+ * holds a Sash.
+ *
+ * Covered cases:
+ *
+ * - **Focus Sash at full HP**: guaranteed survival of any one hit;
+ *   pivoting away throws that protection (the Sash is on, the swap-in
+ *   doesn't inherit it).
+ * - **Sturdy at full HP**: same guarantee, ability-based.
+ * - **Weak Armor / Anger Point** with the foe likely to fire a SE /
+ *   physical hit and us surviving — the trigger arrives next turn,
+ *   pre-empt the swap.
+ * - **Weakness Policy holder** when the foe has revealed a SE move
+ *   AND we can survive that hit (matchup `foeDealFraction < 0.9` is a
+ *   rough proxy for "Sash/Sturdy/multiscale/Eviolite let us tank").
+ * - **Unburden holder** carrying a one-shot consumable (Sash, Berry,
+ *   Seed, Booster) — about to lose the item and double its speed.
+ *
+ * @param myMon Tracked current mon.
+ * @param foeMon Tracked foe active.
+ * @returns true when a swap would burn the setup window.
+ */
+function shouldPreserveSetupWindow(
+	myMon: TrackedPokemon,
+	foeMon: TrackedPokemon
+): boolean {
+	const hpf = myMon.hpFraction ?? 1;
+	const item = toID(myMon.item);
+	const ability = toID(myMon.ability);
+	if (hpf >= 0.99 && item === "focussash") return true;
+	if (hpf >= 0.99 && ability === "sturdy") return true;
+	// Weakness Policy: only relevant if the foe has actually revealed
+	// a SE move (anything else is speculation), and we plausibly tank
+	// at least one such hit (no need for full survivability math here
+	// — the broader survivability gate in `evaluateMatchup` handles
+	// the OHKO case via the score the caller already consulted).
+	if (item === "weaknesspolicy" && hpf >= 0.6) {
+		for (const moveId of foeMon.revealedMoves) {
+			const move = Dex.moves.get(moveId);
+			if (!move?.exists || move.category === "Status") continue;
+			let eff = 0;
+			for (const t of myMon.types) eff += Dex.getEffectiveness(move.type, t);
+			if (eff > 0) return true;
+		}
+	}
+	// Unburden: holding a one-shot consumable that's about to fire.
+	// Pivoting away forfeits both the consumable's effect *and* the
+	// post-consume +Speed.
+	if (ability === "unburden") {
+		const oneShotItems = new Set([
+			"focussash", "boosterenergy",
+			"grassyseed", "electricseed", "mistyseed", "psychicseed",
+			"salacberry", "liechiberry", "petayaberry",
+			"ganlonberry", "apicotberry", "starfberry",
+			"sitrusberry", "lumberry",
+		]);
+		if (oneShotItems.has(item)) return true;
+	}
+	return false;
+}
+
+/**
+ * True iff the given active mon has a one-shot "live through anything"
+ * guarantee this turn — Focus Sash at full HP or Sturdy at full HP.
+ * Used by the stay-and-sac gate: a doomed mon is exempt when it still
+ * has a survival guarantee, since that guarantee will pay for our
+ * "one more turn" play anyway.
+ *
+ * @param mon The current active mon to inspect.
+ * @returns true when the mon should be considered "guaranteed to
+ *   survive this turn no matter what hits it".
+ */
+function hasGuaranteedSurvivalForActive(mon: TrackedPokemon): boolean {
+	const hpf = mon.hpFraction ?? 1;
+	if (hpf < 0.99) return false;
+	const item = toID(mon.item);
+	const ability = toID(mon.ability);
+	return item === "focussash" || ability === "sturdy";
 }
 
 /** Re-export the small helper consumers may want. */

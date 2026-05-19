@@ -272,7 +272,135 @@ function entrySynergyBonus(
 		}
 	}
 
+	// Absorb / punish ability switch-in: if the foe has revealed (or
+	// just used) a move that our ability nullifies or feeds on, this
+	// is a free turn — often a heal, a stat boost, or a flat
+	// nullification. The damage calc already returns 0 for the
+	// nullified hit, so `foeDealFraction` reflects the *avoided*
+	// damage; this bonus reflects the *positive* upside (the heal /
+	// boost / continued pressure from the absorb).
+	bonus += absorbAbilityBonus(mon, foe);
+
+	// Weakness Policy "bait" recognition: the holder *wants* a SE
+	// physical or special hit to trigger +2 Atk / +2 SpA. If the foe's
+	// best plausible move is SE on us, the candidate trades one hit
+	// for a free double-dance. Survivability gating happens upstream
+	// in `evaluateMatchup` so we don't recommend WP-baiting on a 4×
+	// weakness OHKO.
+	if (item === "weaknesspolicy") {
+		const seBait = anyRevealedFoeMoveIsSuperEffective(foe, mon);
+		if (seBait) bonus += 10;
+	}
+
 	return bonus;
+}
+
+/**
+ * Bonus a candidate earns for having an ability that turns one of the
+ * foe's *revealed* moves into a "do nothing / give us something"
+ * outcome.
+ *
+ * Where the damage calc already zeros out the matchup's
+ * `foeDealFraction` (Flash Fire blocking Fire, Water Absorb / Volt
+ * Absorb blocking their type, Levitate ignoring Ground, etc.), this
+ * bonus represents the *additional* value beyond just "didn't take
+ * damage": a heal, a +1 stat stage, or sustained type pressure.
+ *
+ * The check requires the foe to have actually revealed (or last-used)
+ * a matching move — we don't switch a Flash Fire user into a foe with
+ * no Fire move on its known list just because Charizard *might* have
+ * one. Revealed-only avoids cheating with hidden moves while still
+ * acting on the simulator-emitted signal.
+ *
+ * @param mon Candidate switch-in.
+ * @param foe Foe's active mon (with its revealed move set).
+ * @returns Synergy bonus, capped at +20 to keep matchup math sane.
+ */
+function absorbAbilityBonus(
+	mon: TrackedPokemon,
+	foe: TrackedPokemon
+): number {
+	const ability = toID(mon.ability);
+	if (!ability) return 0;
+	const known = new Set<string>(foe.revealedMoves);
+	if (foe.lastMove) known.add(foe.lastMove);
+	if (known.size === 0) return 0;
+	let bonus = 0;
+	for (const moveId of known) {
+		const move = Dex.moves.get(moveId);
+		if (!move?.exists || move.category === "Status") continue;
+		const moveType = move.type;
+		// Type immunities that grant a flat-out free turn.
+		if (
+			(ability === "flashfire" && moveType === "Fire") ||
+			(ability === "wellbakedbody" && moveType === "Fire") ||
+			(ability === "voltabsorb" && moveType === "Electric") ||
+			(ability === "lightningrod" && moveType === "Electric") ||
+			(ability === "motordrive" && moveType === "Electric") ||
+			(ability === "waterabsorb" && moveType === "Water") ||
+			(ability === "stormdrain" && moveType === "Water") ||
+			(ability === "dryskin" && moveType === "Water") ||
+			(ability === "sapsipper" && moveType === "Grass") ||
+			(ability === "eartheater" && moveType === "Ground") ||
+			(ability === "levitate" && moveType === "Ground") ||
+			(ability === "windrider" && (move.flags?.wind || moveType === "Flying"))
+		) {
+			// Heal / boost abilities are slightly better than pure
+			// nullifications because they also tip the matchup in our
+			// favour for next turn.
+			const boostAbilities = new Set([
+				"flashfire", "wellbakedbody", "stormdrain", "lightningrod",
+				"motordrive", "sapsipper", "windrider",
+			]);
+			const healAbilities = new Set(["voltabsorb", "waterabsorb", "dryskin", "eartheater"]);
+			if (boostAbilities.has(ability)) bonus = Math.max(bonus, 20);
+			else if (healAbilities.has(ability)) bonus = Math.max(bonus, 18);
+			else bonus = Math.max(bonus, 14);
+			continue;
+		}
+		// Flag-based immunities.
+		if (ability === "bulletproof" && move.flags?.bullet) {
+			bonus = Math.max(bonus, 16);
+			continue;
+		}
+		if (ability === "soundproof" && move.flags?.sound) {
+			bonus = Math.max(bonus, 14);
+			continue;
+		}
+		// Purifying Salt: not an immunity, but halves Ghost damage and
+		// makes us status-proof. A modest bonus when the foe has a
+		// Ghost move revealed.
+		if (ability === "purifyingsalt" && moveType === "Ghost") {
+			bonus = Math.max(bonus, 8);
+		}
+	}
+	return bonus;
+}
+
+/**
+ * True if any of the foe's revealed moves would be super-effective on
+ * `mon` (used to detect Weakness Policy / Beast Boost / Anger Point
+ * "bait" scenarios).
+ *
+ * @param foe Foe with revealedMoves.
+ * @param mon Candidate evaluating the matchup.
+ * @returns true when any revealed move's type is 2× or 4× on `mon`.
+ */
+function anyRevealedFoeMoveIsSuperEffective(
+	foe: TrackedPokemon,
+	mon: TrackedPokemon
+): boolean {
+	if (!foe.revealedMoves.size && !foe.lastMove) return false;
+	const known = new Set<string>(foe.revealedMoves);
+	if (foe.lastMove) known.add(foe.lastMove);
+	for (const moveId of known) {
+		const move = Dex.moves.get(moveId);
+		if (!move?.exists || move.category === "Status") continue;
+		let eff = 0;
+		for (const t of mon.types) eff += Dex.getEffectiveness(move.type, t);
+		if (eff > 0) return true;
+	}
+	return false;
 }
 
 /**
@@ -420,7 +548,26 @@ function computeSpeedDelta(
 	return delta;
 }
 
-function scaledSpeed(mon: TrackedPokemon, tailwind: boolean, weather: string): number {
+/**
+ * Compute the effective Speed of `mon` after weather-speed abilities
+ * (Swift Swim, Chlorophyll, Sand Rush, Slush Rush), Paradox-style
+ * +50% boosts, Choice Scarf, stat-stage modifiers, Tailwind, and
+ * Paralysis. This is the same number {@link evaluateMatchup} uses
+ * when computing speed-tier deltas, and is exported so other engine
+ * layers (emergency-switch checks, `weOutspeed` predicates) can stay
+ * consistent with the switch evaluator.
+ *
+ * @param mon The Pokemon whose effective Speed we want.
+ * @param tailwind Whether the side currently has Tailwind active.
+ * @param weather The current field weather id (`raindance`,
+ *   `sunnyday`, `sandstorm`, `snow`, ...).
+ * @returns Estimated in-battle Speed stat (post-modifiers).
+ */
+export function scaledSpeed(
+	mon: TrackedPokemon,
+	tailwind: boolean,
+	weather: string
+): number {
 	let spe = mon.stats?.spe ?? approximateSpeed(mon);
 	const stage = mon.boosts.spe || 0;
 	if (stage > 0) spe = Math.floor(spe * (2 + stage) / 2);
