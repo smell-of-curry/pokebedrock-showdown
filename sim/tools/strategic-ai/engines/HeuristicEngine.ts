@@ -57,6 +57,18 @@ const SWITCH_OUT_MATCHUP = -8;
 const PROACTIVE_SWITCH_DELTA = 18;
 /** Absolute bench score required to take a proactive switch. */
 const PROACTIVE_SWITCH_FLOOR = 12;
+/**
+ * Moves whose positive priority (or usability) is conditional and so
+ * can't be relied on to KO on a future turn: Fake Out / First Impression
+ * only work on the switch-in turn, Sucker Punch only fires if the foe
+ * attacks. They must not count toward the "we're already a priority-KO
+ * threat, don't switch out" veto.
+ */
+const CONDITIONAL_PRIORITY_MOVES = new Set([
+	"fakeout",
+	"firstimpression",
+	"suckerpunch",
+]);
 
 /** Lazy `Dex.moves.get`. */
 function moveOf(id: string) {
@@ -328,8 +340,8 @@ export class HeuristicEngine implements Engine {
 		// Barraskewda misfire reported in playtest.
 		const myTailwind = tracker.sides[tracker.mySide].tailwindTurns > 0;
 		const foeTailwind = tracker.sides[tracker.foeSide].tailwindTurns > 0;
-		const myEff = scaledSpeed(myMon, myTailwind, tracker.field.weather);
-		const foeEff = scaledSpeed(foeMon, foeTailwind, tracker.field.weather);
+		const myEff = scaledSpeed(myMon, myTailwind, tracker.field.weather, tracker.field.terrain);
+		const foeEff = scaledSpeed(foeMon, foeTailwind, tracker.field.weather, tracker.field.terrain);
 		const wereFaster = tracker.field.trickRoom ? myEff < foeEff : myEff > foeEff;
 
 		// Find best candidate so we can both rank it and use it for the
@@ -462,6 +474,12 @@ export class HeuristicEngine implements Engine {
 			const move = moveOf(m.id);
 			if (!move?.exists || move.category === "Status") continue;
 			if ((move.priority ?? 0) <= 0) continue;
+			// Conditional-priority moves only have their priority (and
+			// sometimes only work at all) under specific circumstances:
+			// Fake Out / First Impression only on the turn we switch in,
+			// Sucker Punch only if the foe attacks. We can't rely on
+			// them to KO "next turn", so they must not veto a switch.
+			if (CONDITIONAL_PRIORITY_MOVES.has(toID(m.id))) continue;
 			const calc = calculateDamage({
 				attacker: fromTracked(myMon),
 				defender: fromTracked(foeMon),

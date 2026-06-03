@@ -421,7 +421,12 @@ function evaluateStatus(
 	// and with hazards on the foe side (any forced switch eats chip).
 	if (moveId === "yawn") {
 		if (defender.status) return { moveId, score: -10, rationale: "yawnRedundant" };
-		if (tracker.field.terrain === "electricterrain" || tracker.field.terrain === "mistyterrain") {
+		// Electric/Misty Terrain only block sleep on *grounded* targets;
+		// an airborne / Levitate foe can still be put to sleep.
+		const yawnBlockedByTerrain =
+			(tracker.field.terrain === "electricterrain" || tracker.field.terrain === "mistyterrain") &&
+			tracker.isPokemonGrounded(defender);
+		if (yawnBlockedByTerrain) {
 			return { moveId, score: -10, rationale: "yawnTerrainBlocked" };
 		}
 		if (attacker.volatiles.has("yawn") || defender.volatiles.has("yawn")) {
@@ -694,27 +699,32 @@ function scoreStatusInfliction(status: string, ctx: MoveEvalContext): number {
 		myMoves.has("cosmicpower") || myMoves.has("acidarmor") ||
 		myMoves.has("calmmind") || myMoves.has("bulkup");
 	const stallComboBonus = (hasProtect ? 4 : 0) + (hasRecovery ? 4 : 0) + (hasDefBoost ? 3 : 0);
+	// Electric/Misty Terrain only block status moves on *grounded*
+	// targets — an airborne / Levitate foe is still a legal target.
+	const grounded = tracker.isPokemonGrounded(defender);
+	const mistyBlocks = grounded && tracker.field.terrain === "mistyterrain";
+	const electricBlocks = grounded && tracker.field.terrain === "electricterrain";
 	switch (status) {
 	case "tox":
 	case "psn": {
 		if (defender.types.includes("Steel") || defender.types.includes("Poison")) return -20;
 		// Misty Terrain blocks all major statuses on grounded foes;
 		// don't waste a turn trying.
-		if (tracker.field.terrain === "mistyterrain") return -10;
+		if (mistyBlocks) return -10;
 		return 16 + stallComboBonus;
 	}
 	case "brn": {
 		if (defender.types.includes("Fire")) return -20;
-		if (tracker.field.terrain === "mistyterrain") return -10;
+		if (mistyBlocks) return -10;
 		return 14 + stallComboBonus;
 	}
 	case "par": {
 		if (defender.types.includes("Electric") || defender.types.includes("Ground")) return -20;
-		if (tracker.field.terrain === "electricterrain" || tracker.field.terrain === "mistyterrain") return -10;
+		if (electricBlocks || mistyBlocks) return -10;
 		return (ctx.weOutspeed ? 6 : 14) + stallComboBonus;
 	}
 	case "slp": {
-		if (tracker.field.terrain === "electricterrain" || tracker.field.terrain === "mistyterrain") return -10;
+		if (electricBlocks || mistyBlocks) return -10;
 		return 18 + stallComboBonus;
 	}
 	case "frz": return 6; // Rare.
@@ -751,10 +761,13 @@ function evaluateCounterMove(
 		moveId === "mirrorcoat" ? "Special" : "Any";
 	const foeLast = defender.lastMove ? Dex.moves.get(defender.lastMove) : null;
 	const foeLastCategory = foeLast?.category;
-	// Outspeeding means we go before the foe can hit us this turn, and
-	// counters reflect "damage taken this turn" — so outspeeding makes
-	// them whiff. The move is best when we're slower.
-	const slower = !ctx.weOutspeed;
+	// Counter and Mirror Coat have -5 priority, so they *always* move
+	// after the foe regardless of Speed — meaning they reflect "damage
+	// taken this turn" even when we outspeed. Only Metal Burst sits at
+	// +0 priority and genuinely whiffs when we move first; for it the
+	// move is best when we're the slower mon.
+	const slower = moveId === "counter" || moveId === "mirrorcoat" ?
+		true : !ctx.weOutspeed;
 	let score: number;
 	let rationale = moveId;
 	const matches =
@@ -789,17 +802,18 @@ function evaluateCounterMove(
  * about to use an attacking move on the same turn. We don't have a
  * perfect predictor, but two signals are usually decisive:
  *
- * - Foe is **choice-locked** into a damaging move → Sucker Punch
- *   is guaranteed to fire; treat it as the best-case priority KO.
- * - Foe **just used** a status / setup / pivot move → Sucker Punch
- *   has a high probability of failing this turn; large negative
- *   score so the AI prefers literally any other move.
- * - Otherwise: small positive baseline (mostly damage), routed back
- *   through the normal damage path so STAB / boosts / items still
- *   register.
+ * - Foe **just used** a status / setup / pivot move (and isn't
+ *   choice-locked) → Sucker Punch has a high probability of failing
+ *   this turn; large negative score so the AI prefers any other move.
+ * - Otherwise (including the foe being **choice-locked** into a
+ *   damaging move, where Sucker Punch is almost guaranteed to fire):
+ *   fall through to the normal damage path. That scores the move on
+ *   its actual damage — so a weak / non-STAB Sucker Punch isn't
+ *   mistaken for a real KO — while STAB / boosts / items and the
+ *   priority-KO bonus still register.
  *
  * Returns `null` to fall through to the default damage path when no
- * specific signal applies.
+ * specific failure signal applies.
  *
  * @param move The Sucker Punch move definition.
  * @param ctx The move evaluation context.
@@ -817,17 +831,12 @@ function evaluateSuckerPunch(
 		// auto-fails. Give it a hard negative score.
 		return { moveId: toID(move.id), score: -15, rationale: "suckerpunchFail" };
 	}
-	if (defender.choiceLocked && last?.exists && last.category !== "Status") {
-		// Locked into an attack → almost-guaranteed fire. Layer on the
-		// priority-KO baseline; the caller's damage path can't reach
-		// this branch but we still pay for the BP via a synthesised
-		// score (priority KO = 30 in our scale).
-		return {
-			moveId: toID(move.id),
-			score: 35,
-			rationale: "suckerpunchLockedKO",
-		};
-	}
+	// Otherwise (incl. the foe being choice-locked into an attack, where
+	// Sucker Punch is almost guaranteed to fire) fall through to the
+	// normal damage path. That scores the move on its *actual* damage —
+	// so a weak / non-STAB Sucker Punch isn't mistaken for a real KO —
+	// and already layers on the priority-KO bonus when the hit is
+	// genuinely threatening.
 	return null;
 }
 
@@ -865,11 +874,19 @@ function scoreDestinyBond(ctx: MoveEvalContext): number {
 	const { attacker } = ctx;
 	if (attacker.volatiles.has("destinybond")) return -25;
 	const myHp = attacker.hpFraction ?? 1;
-	const foeFaster = !ctx.weOutspeed;
-	// Critical HP + foe outspeeds + foe is a likely KO threat — trade.
-	if (myHp < 0.25 && foeFaster) return 55;
-	if (myHp < 0.4 && foeFaster) return 18;
-	// Healthy: DB is wasted turn (foe just keeps not attacking).
+	// Destiny Bond only forces a trade if the bond is *up* at the moment
+	// we faint. Destiny Bond itself has +0 priority, so when the foe
+	// outspeeds and can KO us this turn we faint *before* the bond ever
+	// resolves and the move whiffs. The reliable desperation line is the
+	// opposite of what it looks like: we want to move first, set the
+	// bond, and let the foe's KO this turn drag them down with us.
+	const weMoveFirst = ctx.weOutspeed;
+	// Critical HP + we get the bond up before the incoming KO — the
+	// textbook "low HP, take them with me" trade.
+	if (myHp < 0.25 && weMoveFirst) return 55;
+	if (myHp < 0.4 && weMoveFirst) return 18;
+	// Healthy (wasted turn), or we're slower (bond likely whiffs to a
+	// faster KO before it can resolve).
 	return -10;
 }
 

@@ -740,8 +740,12 @@ function computeOffensiveStat(move: Move, input: DamageCalcInput): number {
 	// stat block (best-known) or the species' base stats, defaulting to
 	// the offensive stat if the species lookup fails so the boost still
 	// applies in the common case.
-	const paradoxBoosted = paradoxBoostedStat(input.attacker, ability, input.field);
-	if (paradoxBoosted && paradoxBoosted === offensiveStatKey) {
+	const paradoxBoosted = paradoxBoostedStat(input.attacker, ability, input.field, offensiveWeather);
+	// Foul Play attacks with the *defender's* Attack stat, so the user's
+	// own Protosynthesis / Quark Drive Attack boost must not be folded
+	// back in — that would make a boosted Foul Play user hit far harder
+	// than it really does.
+	if (paradoxBoosted && paradoxBoosted === offensiveStatKey && id !== "foulplay") {
 		baseStat *= paradoxBoostedMultiplier(paradoxBoosted);
 	}
 	const item = toID(input.attacker.item);
@@ -787,7 +791,7 @@ function computeDefensiveStat(move: Move, input: DamageCalcInput): number {
 	// defender's "highest stat" happens to be the relevant defensive
 	// stat (Def for Physical, SpD for Special / Psyshock-family).
 	const defAbility = toID(input.defender.ability);
-	const paradoxBoosted = paradoxBoostedStat(input.defender, defAbility, input.field);
+	const paradoxBoosted = paradoxBoostedStat(input.defender, defAbility, input.field, weather);
 	if (paradoxBoosted && paradoxBoosted === stat) {
 		value *= paradoxBoostedMultiplier(paradoxBoosted);
 	}
@@ -814,13 +818,17 @@ function computeDefensiveStat(move: Move, input: DamageCalcInput): number {
  *
  * @param mon The Pokemon snapshot to evaluate.
  * @param ability The mon's currently-active ability id.
- * @param field The battle field state (used for weather/terrain check).
+ * @param field The battle field state (used for the terrain check).
+ * @param effWeather The *effective* weather id (i.e. after Cloud Nine /
+ *   Air Lock suppression), so Protosynthesis doesn't activate under sun
+ *   that's currently being negated.
  * @returns The boosted stat key, or `null` when not active.
  */
 function paradoxBoostedStat(
 	mon: CalcPokemon,
 	ability: string,
-	field: FieldState
+	field: FieldState,
+	effWeather: string
 ): keyof StatBlock | null {
 	const isProto = ability === "protosynthesis";
 	const isQuark = ability === "quarkdrive";
@@ -835,10 +843,12 @@ function paradoxBoostedStat(
 			if (isStatKey(stat)) return stat;
 		}
 	}
-	const weather = field.weather;
 	const terrain = field.terrain;
 	const item = toID(mon.item);
-	const sun = weather === "sunnyday" || weather === "desolateland";
+	// Use the effective weather so Cloud Nine / Air Lock correctly
+	// suppress sun-based Protosynthesis activation. (Electric Terrain
+	// isn't weather, so Cloud Nine / Air Lock don't touch Quark Drive.)
+	const sun = effWeather === "sunnyday" || effWeather === "desolateland";
 	const eTerrain = terrain === "electricterrain";
 	const booster = item === "boosterenergy";
 	const activeForProto = isProto && (sun || booster);

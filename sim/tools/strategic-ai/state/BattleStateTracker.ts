@@ -830,6 +830,20 @@ export class BattleStateTracker {
 	}
 
 	/**
+	 * Groundedness check keyed directly off a {@link TrackedPokemon}
+	 * snapshot (rather than an active slot). Useful for evaluators that
+	 * already hold the mon record and need to know whether terrain
+	 * effects (Electric/Misty Terrain status blocks, terrain BP boosts)
+	 * apply to it.
+	 *
+	 * @param mon The tracked Pokemon to test.
+	 * @returns true if the mon is grounded.
+	 */
+	isPokemonGrounded(mon: TrackedPokemon): boolean {
+		return this.isMonGrounded(mon);
+	}
+
+	/**
 	 * Mon-keyed groundedness check, shared between {@link isGrounded}
 	 * (the active-slot accessor) and {@link hazardDamageFraction} (the
 	 * switch-in projection). Considers Gravity, Iron Ball, Smack Down,

@@ -208,11 +208,25 @@ function entrySynergyBonus(
 		// scale by how physical the foe looks. Pure special attackers
 		// get the floor (the lost Atk is wasted).
 		const physicalLean = foeAtk > foeSpa ? 1 : foeAtk >= foeSpa * 0.85 ? 0.5 : 0.15;
-		// Unaware on the foe ignores our Intimidate drop's offensive
-		// impact, though the stage is still applied; treat that as
-		// neutral.
-		if (toID(foe.ability) === "unaware") bonus += 0;
-		else bonus += 7 * physicalLean;
+		const foeAbil = toID(foe.ability);
+		// Abilities that turn Intimidate against us: Defiant/Competitive
+		// convert the drop into a +2 boost for the foe, Mirror Armor
+		// reflects it back onto our Attack, and Guard Dog raises the
+		// foe's Attack instead. Switching Intimidate in is actively bad.
+		const punishesIntimidate =
+			foeAbil === "defiant" || foeAbil === "competitive" ||
+			foeAbil === "mirrorarmor" || foeAbil === "guarddog";
+		// Abilities that simply ignore the Attack drop. Note: Unaware is
+		// NOT one of these — it only ignores the *opponent's* stat
+		// stages during damage calc, so the foe still attacks with its
+		// own Intimidate-lowered Attack and the matchup bonus stands.
+		const blocksIntimidate =
+			foeAbil === "clearbody" || foeAbil === "whitesmoke" ||
+			foeAbil === "fullmetalbody" || foeAbil === "hypercutter" ||
+			foeAbil === "innerfocus" || foeAbil === "owntempo" ||
+			foeAbil === "oblivious" || foeAbil === "scrappy";
+		if (punishesIntimidate) bonus -= 6 * physicalLean;
+		else if (!blocksIntimidate) bonus += 7 * physicalLean;
 	}
 
 	// Weather setters on entry: a switch-in that brings a *new* weather
@@ -343,7 +357,11 @@ function absorbAbilityBonus(
 			(ability === "sapsipper" && moveType === "Grass") ||
 			(ability === "eartheater" && moveType === "Ground") ||
 			(ability === "levitate" && moveType === "Ground") ||
-			(ability === "windrider" && (move.flags?.wind || moveType === "Flying"))
+			// Wind Rider only grants a free turn against *wind-flagged*
+			// moves (Tailwind, Hurricane, Bleakwind Storm, ...), NOT
+			// every Flying attack — Brave Bird / Air Slash / Acrobatics
+			// hit it normally.
+			(ability === "windrider" && !!move.flags?.wind)
 		) {
 			// Heal / boost abilities are slightly better than pure
 			// nullifications because they also tip the matchup in our
@@ -396,10 +414,52 @@ function anyRevealedFoeMoveIsSuperEffective(
 	for (const moveId of known) {
 		const move = Dex.moves.get(moveId);
 		if (!move?.exists || move.category === "Status") continue;
+		// A move that deals zero damage can't trigger Weakness Policy,
+		// even if the type chart says it's super-effective (Levitate vs
+		// Ground, Flash Fire vs Fire, Air Balloon vs Ground, ...).
+		if (isMoveNeutralizedBy(move, mon)) continue;
 		let eff = 0;
 		for (const t of mon.types) eff += Dex.getEffectiveness(move.type, t);
 		if (eff > 0) return true;
 	}
+	return false;
+}
+
+/**
+ * True when `target` takes no damage from `move` because of a type,
+ * ability, or item immunity — i.e. the hit would deal zero and so
+ * can't proc damage-triggered effects like Weakness Policy.
+ *
+ * @param move The incoming move.
+ * @param target The Pokemon being hit.
+ * @returns true if the move is fully neutralized.
+ */
+function isMoveNeutralizedBy(move: Move, target: TrackedPokemon): boolean {
+	const moveType = move.type;
+	// Type-based immunity (Ground vs Flying, Normal/Fighting vs Ghost, ...).
+	if (!Dex.getImmunity(moveType, target.types)) return true;
+	const ability = toID(target.ability);
+	const item = toID(target.item);
+	// Ability-based type immunities / absorptions.
+	const absorbType: Record<string, string> = {
+		levitate: "Ground",
+		flashfire: "Fire",
+		wellbakedbody: "Fire",
+		voltabsorb: "Electric",
+		lightningrod: "Electric",
+		motordrive: "Electric",
+		waterabsorb: "Water",
+		stormdrain: "Water",
+		dryskin: "Water",
+		sapsipper: "Grass",
+		eartheater: "Ground",
+	};
+	if (absorbType[ability] === moveType) return true;
+	if (ability === "bulletproof" && move.flags?.bullet) return true;
+	if (ability === "soundproof" && move.flags?.sound) return true;
+	if ((ability === "windrider" || ability === "windpower") && move.flags?.wind) return true;
+	// Air Balloon grants a Ground immunity until it pops.
+	if (item === "airballoon" && moveType === "Ground") return true;
 	return false;
 }
 
@@ -430,19 +490,22 @@ export function chooseBestSwitch(
 /**
  * Find the best damaging move `attacker` can throw at `defender`.
  *
- * We pull every revealed damaging move from the attacker's known set,
- * AND additionally consider STAB-type proxies derived from the
- * attacker's species. STAB types are publicly inferable from the
- * species, so this isn't "cheating": the AI just refuses to pretend
- * a Garchomp won't have a Ground STAB until it sees Earthquake.
+ * We pull every revealed damaging move from the attacker's known set.
+ * When we're estimating the *foe's* threat (`useKnownOnly === true`)
+ * the revealed set is only partial, so we additionally consider
+ * STAB-type proxies derived from the foe's species. STAB types are
+ * publicly inferable from the species, so this isn't "cheating": the
+ * AI just refuses to pretend a Garchomp won't have a Ground STAB until
+ * it sees Earthquake. Without this, a foe that has only revealed one
+ * of its two STABs looks artificially safe — so on monotype teams the
+ * AI would happily switch a 4×-weak teammate into an unrevealed hit.
  *
- * Without this, a foe that has only revealed one of its two STABs
- * looks artificially safe — so on monotype teams the AI would happily
- * switch a 4×-weak teammate into an unrevealed coverage hit.
- *
- * When `useKnownOnly` is false (our → foe evaluation) we additionally
- * probe a wider coverage-type shortlist so we estimate our own
- * unrevealed-but-likely move pool optimistically.
+ * For *our* side (`useKnownOnly === false`) the revealed set is seeded
+ * from the battle request and is therefore the complete moveset, so we
+ * use it as-is and only fall back to proxies if it somehow contains no
+ * damaging move. Each proxy is emitted in both Physical and Special
+ * flavours so special-leaning attackers aren't clamped to their unused
+ * Attack stat (the max-damage selection picks whichever hurts more).
  *
  * @param attacker The CalcPokemon snapshot of the attacking side.
  * @param defender The CalcPokemon snapshot of the defending side.
@@ -450,7 +513,7 @@ export function chooseBestSwitch(
  * @param attackerMon TrackedPokemon record for the attacker (move pool).
  * @param defenderMon TrackedPokemon record for the defender (unused, for symmetry).
  * @param useKnownOnly True when we're estimating the foe's threat to us:
- *   skips the wide coverage probe but still includes STAB proxies.
+ *   uses only revealed moves plus species STAB proxies (no coverage probe).
  * @param attackerSideId Tracker side id of the attacker (for screens/Tailwind).
  * @param defenderSideId Tracker side id of the defender (for screens/Tailwind).
  * @returns The highest expected damage roll along with the move id, or `null`
@@ -472,46 +535,58 @@ function bestAttackingDamage(
 		const m = Dex.moves.get(id);
 		if (m && m.category !== "Status" && m.basePower > 0) moves.push(m);
 	}
-	// Always add STAB proxies for the attacker's effective types — but
-	// only ones the attacker doesn't already cover with a revealed move
-	// of the same type. Species typing is public information, so
-	// assuming the mon has at least *one* damaging STAB option is safe
-	// and prevents the AI from over-trusting an incomplete revealed
-	// list. Skipping types we already see avoids double-counting
-	// (revealed Earthquake + imagined "Proxy Ground" → over-estimate).
-	const revealedTypes = new Set(moves.map(m => m.type));
-	const tackleProto = Dex.moves.get("tackle");
-	const seenProxyTypes = new Set<string>();
-	for (const t of attackerMon.types) {
-		if (seenProxyTypes.has(t) || revealedTypes.has(t)) continue;
-		seenProxyTypes.add(t);
-		// Slightly lower BP for the proxy (80) than a real STAB so the
-		// estimate is "the foe probably has *some* attack of this type"
-		// without claiming it's a guaranteed top-tier hit.
-		moves.push({
-			...tackleProto,
-			id: `proxystab${t.toLowerCase()}` as never,
-			name: `Proxy ${t}`,
-			type: t,
-			category: "Physical",
-			basePower: 80,
-			accuracy: 100,
-		});
-	}
-	if (!useKnownOnly) {
-		// Coverage moves: the most-feared off-type move. We probe a
-		// shortlist of common types; the best one wins.
-		for (const t of COMMON_COVERAGE_TYPES) {
-			if (seenProxyTypes.has(t) || revealedTypes.has(t)) continue;
+	const hasRevealedDamage = moves.length > 0;
+	// Whether to synthesise STAB / coverage proxies for unrevealed moves.
+	//
+	// For the *foe* (`useKnownOnly === true`) the revealed set is
+	// partial, so proxies are essential — they stop a foe that's only
+	// shown one of its two STABs from looking artificially safe.
+	//
+	// For *our* side (`useKnownOnly === false`) the revealed set is
+	// seeded from the battle request and is therefore the *complete*
+	// moveset. Imagining extra STAB/coverage moves on top would
+	// overestimate our own output and skew matchup/switching decisions,
+	// so we only fall back to proxies when (defensively) we somehow have
+	// no revealed damaging move to work from.
+	const addProxies = useKnownOnly || !hasRevealedDamage;
+	if (addProxies) {
+		// Skip types already covered by a revealed move to avoid
+		// double-counting (revealed Earthquake + imagined "Proxy
+		// Ground" → over-estimate). Emit BOTH categories per type and
+		// let the max-damage selection below pick whichever side
+		// actually hurts — this avoids clamping a special attacker
+		// (e.g. Magnezone) to its unused Attack stat.
+		const revealedTypes = new Set(moves.map(m => m.type));
+		const tackleProto = Dex.moves.get("tackle");
+		const seenProxyTypes = new Set<string>();
+		const pushProxy = (idPrefix: string, t: string, category: "Physical" | "Special") => {
 			moves.push({
 				...tackleProto,
-				id: `proxycov${t.toLowerCase()}` as never,
-				name: `Proxy ${t}`,
+				id: `${idPrefix}${category.toLowerCase()}${t.toLowerCase()}` as never,
+				name: `Proxy ${category} ${t}`,
 				type: t,
-				category: "Physical",
+				// Slightly lower BP for the proxy (80) than a real STAB
+				// so the estimate is "probably has *some* attack of this
+				// type" without claiming a guaranteed top-tier hit.
+				category,
 				basePower: 80,
 				accuracy: 100,
 			});
+		};
+		for (const t of attackerMon.types) {
+			if (seenProxyTypes.has(t) || revealedTypes.has(t)) continue;
+			seenProxyTypes.add(t);
+			pushProxy("proxystab", t, "Physical");
+			pushProxy("proxystab", t, "Special");
+		}
+		if (!useKnownOnly) {
+			// Coverage moves: the most-feared off-type move. We probe a
+			// shortlist of common types; the best one wins.
+			for (const t of COMMON_COVERAGE_TYPES) {
+				if (seenProxyTypes.has(t) || revealedTypes.has(t)) continue;
+				pushProxy("proxycov", t, "Physical");
+				pushProxy("proxycov", t, "Special");
+			}
 		}
 	}
 	let best: { avgDamage: number, moveId: string } | null = null;
@@ -541,8 +616,9 @@ function computeSpeedDelta(
 	tracker: BattleStateTracker
 ): number {
 	const weather = tracker.field.weather;
-	const mySpe = scaledSpeed(mon, tracker.sides[tracker.mySide].tailwindTurns > 0, weather);
-	const foeSpe = scaledSpeed(foe, tracker.sides[tracker.foeSide].tailwindTurns > 0, weather);
+	const terrain = tracker.field.terrain;
+	const mySpe = scaledSpeed(mon, tracker.sides[tracker.mySide].tailwindTurns > 0, weather, terrain);
+	const foeSpe = scaledSpeed(foe, tracker.sides[tracker.foeSide].tailwindTurns > 0, weather, terrain);
 	let delta = mySpe - foeSpe;
 	if (tracker.field.trickRoom) delta = -delta;
 	return delta;
@@ -561,12 +637,16 @@ function computeSpeedDelta(
  * @param tailwind Whether the side currently has Tailwind active.
  * @param weather The current field weather id (`raindance`,
  *   `sunnyday`, `sandstorm`, `snow`, ...).
+ * @param terrain The current field terrain id (`electricterrain`, ...);
+ *   used so Quark Drive's Speed boost can fire off Electric Terrain set
+ *   by another source, not just Booster Energy. Defaults to none.
  * @returns Estimated in-battle Speed stat (post-modifiers).
  */
 export function scaledSpeed(
 	mon: TrackedPokemon,
 	tailwind: boolean,
-	weather: string
+	weather: string,
+	terrain = ""
 ): number {
 	let spe = mon.stats?.spe ?? approximateSpeed(mon);
 	const stage = mon.boosts.spe || 0;
@@ -587,7 +667,7 @@ export function scaledSpeed(
 	// as the highest stat: this is the +50% Booster-Energy / sun /
 	// electric-terrain bonus (`paradoxBoostedStat` returns `spe` only
 	// in that case).
-	if (paradoxSpeedActive(mon, weather)) spe = Math.floor(spe * 1.5);
+	if (paradoxSpeedActive(mon, weather, terrain)) spe = Math.floor(spe * 1.5);
 	if (tailwind) spe *= 2;
 	if (mon.status === "par" && ability !== "quickfeet") spe = Math.floor(spe / 2);
 	if (ability === "quickfeet" && mon.status) spe = Math.floor(spe * 1.5);
@@ -602,9 +682,11 @@ export function scaledSpeed(
  *
  * @param mon Tracked Pokemon snapshot.
  * @param weather Active weather id.
+ * @param terrain Active terrain id (Quark Drive activates on Electric
+ *   Terrain regardless of who set it).
  * @returns true if the Speed multiplier applies.
  */
-function paradoxSpeedActive(mon: TrackedPokemon, weather: string): boolean {
+function paradoxSpeedActive(mon: TrackedPokemon, weather: string, terrain: string): boolean {
 	const ability = toID(mon.ability);
 	if (ability !== "protosynthesis" && ability !== "quarkdrive") return false;
 	for (const v of mon.volatiles) {
@@ -613,12 +695,13 @@ function paradoxSpeedActive(mon: TrackedPokemon, weather: string): boolean {
 	const item = toID(mon.item);
 	const hasBooster = item === "boosterenergy";
 	const sun = weather === "sunnyday" || weather === "desolateland";
+	const eTerrain = terrain === "electricterrain";
 	const isProto = ability === "protosynthesis";
 	// Without an explicit volatile or stat block we don't know which
 	// stat the ability picks. Approximate by checking whether Speed is
 	// the species' highest base stat (the most common Paradox sweeper
 	// configuration). Conservative: returns false when in doubt.
-	if (!(isProto ? sun || hasBooster : hasBooster)) return false;
+	if (!(isProto ? sun || hasBooster : eTerrain || hasBooster)) return false;
 	const stats = mon.stats;
 	if (!stats) {
 		// Fall back to a species-base-stat lookup; the Dex import is

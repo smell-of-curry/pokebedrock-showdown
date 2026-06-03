@@ -89,15 +89,27 @@ describe('Strategic-AI MoveEvaluator', () => {
 				`Destiny Bond at full HP should be heavily negative (got ${result.score})`);
 		});
 
-		it('scores high at low HP when the foe is faster', () => {
+		it('scores high at low HP when we move first (so the bond resolves before we faint)', () => {
+			const tracker = freshTracker();
+			const me = mkTracked('Aegislash', { ability: 'stancechange', hpFraction: 0.18 });
+			const foe = mkTracked('Garchomp', { revealedMoves: ['earthquake'] });
+			const result = evaluateMove(Dex.moves.get('destinybond'), ctxFor(me, foe, tracker, {
+				weOutspeed: true,
+			}));
+			assert(result.score > 30,
+				`Destiny Bond at <20% HP when we outspeed should be a top pick (got ${result.score})`);
+		});
+
+		it('is a weak pick at low HP when the foe outspeeds and KOs before the bond is up', () => {
 			const tracker = freshTracker();
 			const me = mkTracked('Aegislash', { ability: 'stancechange', hpFraction: 0.18 });
 			const foe = mkTracked('Garchomp', { revealedMoves: ['earthquake'] });
 			const result = evaluateMove(Dex.moves.get('destinybond'), ctxFor(me, foe, tracker, {
 				weOutspeed: false,
 			}));
-			assert(result.score > 30,
-				`Destiny Bond at <20% HP vs faster foe should be a top pick (got ${result.score})`);
+			assert(result.score < 0,
+				`Destiny Bond into a faster KO should be negative — it whiffs ` +
+				`before resolving (got ${result.score})`);
 		});
 
 		it('is refused when DB is already volatile (cannot be used twice in a row)', () => {
@@ -187,6 +199,21 @@ describe('Strategic-AI MoveEvaluator', () => {
 			}));
 			assert(result.score > 20,
 				`Mirror Coat vs a foe that just used Special should score >20 (got ${result.score})`);
+		});
+
+		it('Counter still scores high when we OUTSPEED (−5 priority always moves last)', () => {
+			const tracker = freshTracker();
+			const me = mkTracked('Wobbuffet', { ability: 'shadowtag' });
+			const foe = mkTracked('Garchomp', {
+				revealedMoves: ['earthquake'],
+				lastMove: 'earthquake',
+			});
+			const result = evaluateMove(Dex.moves.get('counter'), ctxFor(me, foe, tracker, {
+				weOutspeed: true,
+			}));
+			assert(result.score > 20,
+				`Counter should still score high when we outspeed — its −5 ` +
+				`priority makes it resolve after the foe anyway (got ${result.score})`);
 		});
 
 		it('Counter outscores Destiny Bond when the foe just used a Physical move', () => {

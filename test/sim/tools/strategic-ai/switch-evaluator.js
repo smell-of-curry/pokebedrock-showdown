@@ -228,6 +228,54 @@ describe('Strategic-AI SwitchEvaluator', () => {
 				`Should anticipate STAB Rock threat from Tyranitar even when ` +
 				`unrevealed (got ${result.foeDealFraction.toFixed(2)})`);
 		});
+
+		// Regression: STAB proxies were hardcoded `category: "Physical"`,
+		// so a special-leaning foe (Magnezone) that had only revealed a
+		// non-STAB move was scored off its tiny Attack stat — the AI
+		// massively under-feared its unrevealed special STAB. Proxies are
+		// now emitted in both categories.
+		it('fears a special-leaning foe\'s unrevealed STAB (Magnezone Flash Cannon)', () => {
+			const tracker = freshTracker();
+			// Magnezone (Electric/Steel) has only revealed Thunderbolt;
+			// its Steel STAB is 4× on Aurorus (Rock/Ice) and special.
+			const magnezone = mkTracked('Magnezone', {
+				ability: 'magnetpull',
+				revealedMoves: ['thunderbolt'],
+				stats: { hp: 322, atk: 168, def: 258, spa: 339, spd: 218, spe: 161 },
+			});
+			const aurorus = mkTracked('Aurorus', {
+				ability: 'refrigerate',
+				revealedMoves: ['blizzard'],
+			});
+			const result = evaluateMatchup(aurorus, magnezone, tracker);
+			assert(result.foeDealFraction > 0.6,
+				`Should fear Magnezone's unrevealed special Steel STAB into a ` +
+				`4×-weak Rock/Ice mon (got ${result.foeDealFraction.toFixed(2)})`);
+		});
+
+		// Regression: for our own side `revealedMoves` is seeded complete
+		// from the battle request, so synthesising STAB/coverage proxies
+		// on top overestimated our output. We now use the known set as-is.
+		it('does not invent extra coverage for our own (fully revealed) moveset', () => {
+			const tracker = freshTracker();
+			// Skarmory (Steel/Flying) only carries Brave Bird offensively.
+			// Against Ferrothorn (Steel/Grass) Brave Bird is resisted; the
+			// AI must NOT imagine a coverage Fire move that would be SE.
+			const skarmory = mkTracked('Skarmory', {
+				ability: 'sturdy',
+				revealedMoves: ['bravebird', 'roost', 'spikes', 'whirlwind'],
+			});
+			const ferrothorn = mkTracked('Ferrothorn', {
+				ability: 'ironbarbs',
+				revealedMoves: ['powerwhip'],
+			});
+			const result = evaluateMatchup(skarmory, ferrothorn, tracker);
+			// An invented 4× Fire coverage proxy would push this well
+			// above 0.8; the resisted Brave Bird stays modest.
+			assert(result.weDealFraction < 0.5,
+				`Skarmory should deal little to Ferrothorn — no imagined Fire ` +
+				`coverage (got ${result.weDealFraction.toFixed(2)})`);
+		});
 	});
 
 	// Regression: the AI didn't reward terrain-seed entry synergies, so
@@ -278,6 +326,35 @@ describe('Strategic-AI SwitchEvaluator', () => {
 			assert(intim.score > plain.score,
 				`Intimidate should score higher into a physical attacker than ` +
 				`a non-Intimidate equivalent (intim=${intim.score.toFixed(2)} ` +
+				`plain=${plain.score.toFixed(2)})`);
+		});
+
+		// Regression: Unaware on the foe was wrongly treated as cancelling
+		// Intimidate's bonus. Unaware only ignores the *opponent's* stat
+		// stages during damage calc; the foe still swings with its own
+		// Intimidate-lowered Attack, so the bonus must still apply.
+		it('Intimidate bonus still applies into an Unaware physical attacker', () => {
+			const tracker = freshTracker();
+			const unawareFoe = mkTracked('Garchomp', {
+				ability: 'unaware',
+				revealedMoves: ['earthquake'],
+				stats: { hp: 357, atk: 359, def: 246, spa: 222, spd: 237, spe: 333 },
+			});
+			const landorus = mkTracked('Landorus-Therian', {
+				ability: 'intimidate',
+				item: 'leftovers',
+				revealedMoves: ['earthquake'],
+			});
+			const gliscor = mkTracked('Gliscor', {
+				ability: 'poisonheal',
+				item: 'toxicorb',
+				revealedMoves: ['earthquake'],
+			});
+			const intim = evaluateMatchup(landorus, unawareFoe, tracker);
+			const plain = evaluateMatchup(gliscor, unawareFoe, tracker);
+			assert(intim.score > plain.score,
+				`Intimidate should still out-score a non-Intimidate peer even ` +
+				`when the physical foe has Unaware (intim=${intim.score.toFixed(2)} ` +
 				`plain=${plain.score.toFixed(2)})`);
 		});
 	});
@@ -517,6 +594,19 @@ describe('Strategic-AI SwitchEvaluator', () => {
 			const yesTW = scaledSpeed(lugia, true, '');
 			assert.equal(yesTW, noTW * 2,
 				`Tailwind should double Speed (noTW=${noTW} yesTW=${yesTW})`);
+		});
+
+		it('Quark Drive activates on Electric Terrain set by another source', () => {
+			// Highest stat is Speed, so Quark Drive picks Spe → 1.5×.
+			const ironMon = mkTracked('Iron Valiant', {
+				ability: 'quarkdrive',
+				stats: { hp: 250, atk: 200, def: 150, spa: 200, spd: 150, spe: 300 },
+			});
+			const plain = scaledSpeed(ironMon, false, '', '');
+			const onTerrain = scaledSpeed(ironMon, false, '', 'electricterrain');
+			assert.equal(onTerrain, Math.floor(plain * 1.5),
+				`Quark Drive should give 1.5× Speed on Electric Terrain ` +
+				`(plain=${plain} terrain=${onTerrain})`);
 		});
 
 		it('Paralysis halves Speed (unless Quick Feet)', () => {
