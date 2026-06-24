@@ -3295,7 +3295,6 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		evoLevel: 30,
 		evos: ["Dragonite"],
 		eggGroups: ["Water 1", "Dragon"],
-		cosmeticFormes: ["Dragonair-Christmas"],
 	},
 	dragonite: {
 		num: 149,
@@ -5404,7 +5403,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		eggGroups: ["Human-Like", "Amorphous"],
 		otherFormes: ["Gardevoir-Mega"],
 		formeOrder: ["Gardevoir", "Gardevoir-Mega"],
-		cosmeticFormes: ["Gardevoir-Christmas", "Gardevoir-PBRanni"],
+		cosmeticFormes: ["Gardevoir-PBRanni"],
 	},
 	gardevoirmega: {
 		num: 282,
@@ -11184,7 +11183,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		color: "Green",
 		evos: ["Golurk"],
 		eggGroups: ["Mineral"],
-		cosmeticFormes: ["Golett-Halloween", "Golett-Fullmetal", "Golett-Christmas"],
+		cosmeticFormes: ["Golett-Halloween"],
 	},
 	golurk: {
 		num: 623,
