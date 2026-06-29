@@ -26,7 +26,90 @@ export const bagItems = new Map<
 			['moomoo_milk', (battle, pokemon) => pokemon.heal(100)],
 			['lemonade', (battle, pokemon) => pokemon.heal(70)],
 			['ragecandybar', (battle, pokemon) => pokemon.heal(20)],
+			['casteliacone', (battle, pokemon) => pokemon.heal(20)],
 			['freshwater', (battle, pokemon) => pokemon.heal(30)],
+			// Status healers
+			[
+				'antidote',
+				(battle, pokemon) => {
+					if (pokemon.status === 'psn' || pokemon.status === 'tox') {
+						pokemon.cureStatus();
+					}
+				},
+			],
+			[
+				'burn_heal',
+				(battle, pokemon) => {
+					if (pokemon.status === 'brn') pokemon.cureStatus();
+				},
+			],
+			[
+				'ice_heal',
+				(battle, pokemon) => {
+					if (pokemon.status === 'frz') pokemon.cureStatus();
+				},
+			],
+			[
+				'paralyze_heal',
+				(battle, pokemon) => {
+					if (pokemon.status === 'par') pokemon.cureStatus();
+				},
+			],
+			[
+				'awakening',
+				(battle, pokemon) => {
+					if (pokemon.status === 'slp') pokemon.cureStatus();
+				},
+			],
+			['full_heal', (battle, pokemon) => pokemon.cureStatus()],
+			// Regional treats cure all status conditions
+			['big_malasada', (battle, pokemon) => pokemon.cureStatus()],
+			['lava_cookie', (battle, pokemon) => pokemon.cureStatus()],
+			['lumiose_galette', (battle, pokemon) => pokemon.cureStatus()],
+			['old_gateau', (battle, pokemon) => pokemon.cureStatus()],
+			['shalour_sable', (battle, pokemon) => pokemon.cureStatus()],
+			// PP restore
+			[
+				'ether',
+				(battle, pokemon, moveName) => {
+					const moveSlot = pokemon.moveSlots.find(move => move.id === moveName);
+					if (!moveSlot) return;
+					moveSlot.pp = Math.min(moveSlot.pp + 10, moveSlot.maxpp);
+				},
+			],
+			[
+				'max_ether',
+				(battle, pokemon, moveName) => {
+					const moveSlot = pokemon.moveSlots.find(move => move.id === moveName);
+					if (!moveSlot) return;
+					moveSlot.pp = moveSlot.maxpp;
+				},
+			],
+			[
+				'elixir',
+				(battle, pokemon) => {
+					for (const moveSlot of pokemon.moveSlots) {
+						moveSlot.pp = Math.min(moveSlot.pp + 10, moveSlot.maxpp);
+					}
+				},
+			],
+			[
+				'max_elixir',
+				(battle, pokemon) => {
+					for (const moveSlot of pokemon.moveSlots) {
+						moveSlot.pp = moveSlot.maxpp;
+					}
+				},
+			],
+			// Revives all fainted party members to full HP
+			[
+				'sacred_ash',
+				(battle, pokemon) => {
+					for (const ally of pokemon.side.pokemon) {
+						if (ally.fainted) ally.revive();
+					}
+				},
+			],
 			[
 				'aguav_berry',
 				(battle, pokemon) => Items.aguavberry.onEat.call(battle, pokemon),

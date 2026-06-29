@@ -197,6 +197,13 @@ export class Species extends BasicEffect implements Readonly<BasicEffect & Speci
 	 */
 	readonly evoMinAffection?: number;
 	/**
+	 * The ability the evolving Pokémon species must currently have in order to
+	 * evolve into this Pokémon species.
+	 * @example "Own Tempo" // Rockruff -> Lycanroc-Dusk
+	 * @pokebedrock
+	 */
+	readonly evoAbility?: string;
+	/**
 	 * The Pokémon species that must be in the players party in order for the evolving Pokémon species
 	 * to evolve into this Pokémon species.
 	 * @pokebedrock

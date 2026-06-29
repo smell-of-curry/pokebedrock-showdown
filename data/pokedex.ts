@@ -13658,7 +13658,7 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		heightm: 0.5,
 		weightkg: 9.2,
 		color: "Brown",
-		evos: ["Lycanroc", "Lycanroc-Midnight"],
+		evos: ["Lycanroc", "Lycanroc-Dusk", "Lycanroc-Midnight"],
 		eggGroups: ["Field"],
 		otherFormes: ["Rockruff-Dusk"],
 		formeOrder: ["Rockruff", "Rockruff-Dusk"],
@@ -13726,7 +13726,8 @@ export const Pokedex: import('../sim/dex-species').SpeciesDataTable = {
 		prevo: "Rockruff-Dusk",
 		evoLevel: 25,
 		evoTime: "evening",
-		evoCondition: "from a special Rockruff during the evening",
+		evoAbility: "Own Tempo",
+		evoCondition: "from a Rockruff with Own Tempo during the evening",
 		eggGroups: ["Field"],
 	},
 	wishiwashi: {
