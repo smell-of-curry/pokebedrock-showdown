@@ -73,7 +73,7 @@ export function inferFoeActive(tracker: BattleStateTracker): FoeInference | null
 
 /** Inference for an arbitrary tracked Pokemon (any side). */
 export function inferMon(tracker: BattleStateTracker, mon: TrackedPokemon): FoeInference {
-	const moves = inferMoves(mon);
+	const moves = inferMoves(mon, tracker.gen);
 	const abilities = inferAbilities(mon);
 	const items = inferItems(tracker, mon);
 	const hasBoots = (mon.item ? toID(mon.item) === "heavydutyboots" : (items.get("heavydutyboots") ?? 0) > 0.5);
@@ -102,7 +102,7 @@ export function topMoves(inf: FoeInference, n: number): string[] {
 /** Cache of parsed learnsets per `${speciesId}|${gen}`. */
 const learnsetCache = new Map<string, LearnableMove[]>();
 
-function inferMoves(mon: TrackedPokemon): Distribution {
+function inferMoves(mon: TrackedPokemon, gen: number): Distribution {
 	const dist: Distribution = new Map();
 	// Revealed moves get high mass.
 	const revealed = Array.from(mon.revealedMoves);
@@ -116,7 +116,7 @@ function inferMoves(mon: TrackedPokemon): Distribution {
 		dist.set(id, revealedShare / Math.max(1, revealed.length));
 	}
 	// Spread `remaining` over the species' legal moves we haven't seen yet.
-	const learnset = legalMoves(mon);
+	const learnset = legalMoves(mon, gen);
 	const unseen = learnset.filter(m => !revealed.includes(m));
 	if (unseen.length === 0) {
 		// No unseen moves to absorb the remaining mass — renormalize the
@@ -173,10 +173,15 @@ function inferAbilities(mon: TrackedPokemon): Distribution {
 	for (const type of mon.inferredImmunities) {
 		const candidates = IMMUNITY_ABILITIES[type]?.filter(a => choices.includes(a));
 		if (!candidates?.length) continue;
-		const per = 0.9 / candidates.length;
-		for (const id of candidates) dist.set(id, per);
 		const rest = choices.filter(c => !candidates.includes(c));
-		for (const id of rest) dist.set(id, 0.1 / rest.length);
+		if (rest.length === 0) {
+			// Every legal ability is an immunity candidate — spread the full
+			// mass over them so the distribution still sums to 1.
+			for (const id of candidates) dist.set(id, 1 / candidates.length);
+		} else {
+			for (const id of candidates) dist.set(id, 0.9 / candidates.length);
+			for (const id of rest) dist.set(id, 0.1 / rest.length);
+		}
 		return dist;
 	}
 	const per = 1 / choices.length;
@@ -279,11 +284,12 @@ interface LearnableMove {
  * (gen 9, level-up at 36), `9M` (machine), `8T` (tutor), `9E` (egg).
  *
  * @param species The species name or id to look up.
+ * @param gen The battle's generation, used to gate current-gen sources
+ *   and cache the parsed learnset per gen.
  * @returns Every dex-valid move the species can know in any gen, with
  *   current-gen availability metadata.
  */
-function learnableMoves(species: string): LearnableMove[] {
-	const gen = Dex.gen;
+function learnableMoves(species: string, gen: number): LearnableMove[] {
 	const key = `${toID(species)}|${gen}`;
 	const cached = learnsetCache.get(key);
 	if (cached) return cached;
@@ -324,10 +330,11 @@ function learnableMoves(species: string): LearnableMove[] {
  * data at all (custom formats / modded species).
  *
  * @param mon The tracked Pokemon whose move pool we're estimating.
+ * @param gen The battle's generation, threaded to the learnset lookup.
  * @returns Legal move ids for the prior distribution.
  */
-function legalMoves(mon: TrackedPokemon): string[] {
-	const all = learnableMoves(mon.species);
+function legalMoves(mon: TrackedPokemon, gen: number): string[] {
+	const all = learnableMoves(mon.species, gen);
 	const inGen = all.filter(m => m.inGen);
 	const pool = inGen.length > 0 ? inGen : all;
 	const level = mon.level || 100;

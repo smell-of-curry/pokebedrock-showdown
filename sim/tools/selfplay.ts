@@ -183,8 +183,17 @@ async function playGame(
 
 	const p1 = makeAI(streams.p1, aIsP1 ? a : b);
 	const p2 = makeAI(streams.p2, aIsP1 ? b : a);
-	void p1.start().catch(() => {});
-	void p2.start().catch(() => {});
+	// A crashed AI loop is the only signal that a game is unwinnable; surface
+	// it immediately instead of waiting for the force-tie/hang timers. A
+	// *successful* `start()` resolves at battle end (possibly before `consume`
+	// reads `|win|`), so success maps to a never-settling promise and can't
+	// win the race — only a rejection produces a value.
+	const onlyOnFailure = (p: Promise<void>, side: string) =>
+		p.then(() => new Promise<never>(() => {}), (err: Error) => ({ side, err }));
+	const aiFailure = Promise.race([
+		onlyOnFailure(p1.start(), "p1"),
+		onlyOnFailure(p2.start(), "p2"),
+	]);
 
 	const p1Name = aIsP1 ? "Contender A" : "Contender B";
 	const p2Name = aIsP1 ? "Contender B" : "Contender A";
@@ -232,10 +241,13 @@ async function playGame(
 	};
 
 	try {
-		const raced = await Promise.race([consume(), hung]);
+		const raced = await Promise.race([consume(), hung, aiFailure]);
 		if (raced === "hung") {
 			errored = true;
 			errorMessage = `game hung after ${gameTimeoutMs}ms (force-tie ignored)`;
+		} else if (raced && typeof raced === "object") {
+			errored = true;
+			errorMessage = `${raced.side} AI failed: ${raced.err.message}`;
 		}
 	} catch (err) {
 		errored = true;
@@ -300,12 +312,21 @@ async function runWithWorkerPool(
 			cleanup();
 			reject(err);
 		};
+		// A worker can die (OOM, process.exit) without ever emitting "error";
+		// without this the lane would hang forever instead of erroring the
+		// game and respawning the worker.
+		const onExit = (code: number) => {
+			cleanup();
+			reject(new Error(`worker exited before replying (code ${code})`));
+		};
 		const cleanup = () => {
 			worker.off("message", onMessage);
 			worker.off("error", onError);
+			worker.off("exit", onExit);
 		};
 		worker.on("message", onMessage);
 		worker.on("error", onError);
+		worker.on("exit", onExit);
 		worker.postMessage(task);
 	});
 
@@ -487,21 +508,39 @@ if (require.main === module && isMainThread) {
 		);
 		process.exit(0);
 	}
+	// Reject NaN / out-of-range numeric flags up front with a clear usage
+	// error instead of letting them flow into runSelfPlay() as empty runs,
+	// immediate timeouts, or invalid difficulty configs.
+	const intArg = (
+		raw: string | undefined,
+		name: string,
+		min: number,
+		max = Infinity
+	): number | undefined => {
+		if (raw === undefined) return undefined;
+		const n = Number(raw);
+		if (!Number.isInteger(n) || n < min || n > max) {
+			const range = max === Infinity ? `>= ${min}` : `${min}..${max}`;
+			console.error(`Invalid --${name}: "${raw}" (expected integer ${range})`);
+			process.exit(1);
+		}
+		return n;
+	};
 	const options: SelfPlayOptions = {
 		a: {
-			difficulty: parseInt(args.a ?? "3"),
-			searchBudgetMs: args["budget-a"] ? parseInt(args["budget-a"]) : undefined,
+			difficulty: intArg(args.a, "a", 0, 5) ?? 3,
+			searchBudgetMs: intArg(args["budget-a"], "budget-a", 0),
 		},
 		b: {
-			difficulty: parseInt(args.b ?? "1"),
-			searchBudgetMs: args["budget-b"] ? parseInt(args["budget-b"]) : undefined,
+			difficulty: intArg(args.b, "b", 0, 5) ?? 1,
+			searchBudgetMs: intArg(args["budget-b"], "budget-b", 0),
 		},
-		games: args.games ? parseInt(args.games) : undefined,
+		games: intArg(args.games, "games", 1),
 		format: args.format,
 		seed: (args.seed as PRNGSeed | undefined) ?? null,
-		maxTurns: args["max-turns"] ? parseInt(args["max-turns"]) : undefined,
-		gameTimeoutMs: args["game-timeout"] ? parseInt(args["game-timeout"]) : undefined,
-		jobs: args.jobs ? parseInt(args.jobs) : undefined,
+		maxTurns: intArg(args["max-turns"], "max-turns", 1),
+		gameTimeoutMs: intArg(args["game-timeout"], "game-timeout", 0),
+		jobs: intArg(args.jobs, "jobs", 1),
 		verbose: !args.quiet,
 	};
 	void runSelfPlay(options).then(result => {

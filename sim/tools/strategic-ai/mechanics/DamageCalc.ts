@@ -487,13 +487,15 @@ function resolveMoveType(move: Move, input: DamageCalcInput): string {
 		const memoryType = memoryItemType(toID(input.attacker.item));
 		if (memoryType) type = memoryType;
 	}
+	// Normalize converts every move to Normal (not just already-Normal ones),
+	// so it applies regardless of the move's original type.
+	if (ability === "normalize") return "Normal";
 	if (type === "Normal") {
 		switch (ability) {
 		case "aerilate": return "Flying";
 		case "pixilate": return "Fairy";
 		case "refrigerate": return "Ice";
 		case "galvanize": return "Electric";
-		case "normalize": return "Normal"; // No-op on Normal; -ate boost still applies.
 		}
 	}
 	return type;
@@ -689,7 +691,9 @@ function computeBasePower(move: Move, moveType: string, input: DamageCalcInput):
 		if (move.type === "Normal" && moveType !== "Normal") bp *= 1.2;
 		break;
 	case "normalize":
-		if (moveType === "Normal" && (move.type !== "Normal" || true)) bp *= 1.2;
+		// Only the moves Normalize actually converted (originally non-Normal)
+		// get the 1.2x boost, mirroring Showdown's typeChangerBoosted rule.
+		if (move.type !== "Normal") bp *= 1.2;
 		break;
 	case "stakeout": /* needs "switched in this turn" tracking; skipped */ break;
 	case "sheerforce":

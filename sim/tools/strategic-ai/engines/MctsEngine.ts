@@ -566,7 +566,11 @@ function determinizeMoves(
 	ctx: EngineContext
 ): void {
 	if (!pool.length) return;
-	const present = new Set<string>(foeActive.moveSlots.map(s => s.id));
+	// Exclude only *revealed* moves from the fill pool. Seeding this from the
+	// foe's real move slots would leak hidden information: it would bias the
+	// sampled fills away from the moves the foe actually has, so a fill could
+	// never coincide with the (unrevealed) truth.
+	const present = new Set<string>(revealed);
 	const eligible: string[] = [];
 	const eligibleWeights: number[] = [];
 	for (const [i, id] of pool.entries()) {

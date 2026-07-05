@@ -14,11 +14,11 @@
  * | 2          | LightEngine   | 0.50       | 0.50            | 14            |
  * | 3          | HeuristicE.   | 0.50       | 0.20            | 10            |
  * | 4          | OnePly        | 0.30       | 0.10            | 6             |
- * | 5          | MCTS          | 0.12       | 0.00            | 4             |
+ * | 5          | MCTS          | 0.00       | 0.00            | 4             |
  *
  * The ladder cap bounds the per-step "slip to the next-best move"
- * probability ({@link selectByScoreLadder}); difficulty 5 is
- * near-greedy. The switch margin is how much better a bench mon's
+ * probability ({@link selectByScoreLadder}); difficulty 5 is fully
+ * greedy (no move-selection noise). The switch margin is how much better a bench mon's
  * matchup must score before a voluntary switch fires (boss tiers
  * switch on smaller edges, pokerogue-style).
  *
@@ -112,5 +112,8 @@ export function applyKnobs(ctx: EngineContext, difficulty: number): void {
 	ctx.ladderAdvanceCap = knobs.ladderAdvanceCap;
 	ctx.infoForgetting = knobs.infoForgetting;
 	ctx.switchMargin = knobs.switchMargin;
-	if (knobs.searchBudgetMs) ctx.searchBudgetMs = knobs.searchBudgetMs;
+	// Always assign so a reused EngineContext can't inherit a prior tier's
+	// budget; `options.searchBudgetMs` is re-applied by the caller afterward,
+	// and readers fall back to DEFAULT_BUDGET_MS when this is undefined.
+	ctx.searchBudgetMs = knobs.searchBudgetMs;
 }
