@@ -145,6 +145,7 @@ export class RandomEngine implements Engine {
 			ultra: false,
 			dynamax: false,
 			tera: false,
+			zmove: false,
 		};
 		const commands = activeSlots.map((active, i) => {
 			const me = myPokemon[i];
@@ -153,7 +154,7 @@ export class RandomEngine implements Engine {
 
 			const canMegaEvo = !!active.canMegaEvo && !transformsUsed.mega;
 			const canUltraBurst = !!active.canUltraBurst && !transformsUsed.ultra;
-			let canZMove = !!active.canZMove;
+			let canZMove = !!active.canZMove && !transformsUsed.zmove;
 			const canDynamax = !!active.canDynamax && !transformsUsed.dynamax;
 			const canTerastallize = !!active.canTerastallize && !transformsUsed.tera;
 
@@ -270,6 +271,7 @@ export class RandomEngine implements Engine {
 			const chosenMove = this.pickMoveOption(finalMoves, ctx);
 			if (chosenMove.endsWith(" zmove")) {
 				canZMove = false;
+				transformsUsed.zmove = true;
 				return chosenMove;
 			}
 			if (doTransform) {

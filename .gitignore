@@ -38,6 +38,7 @@ tools/set-import/*.js
 # editor temp files
 *~
 .idea/
+.cursor/
 
 tmp/**/*
 *.lock

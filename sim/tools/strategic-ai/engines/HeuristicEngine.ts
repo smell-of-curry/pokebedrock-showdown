@@ -76,6 +76,27 @@ function moveOf(id: string) {
 }
 
 /**
+ * Per-request claims of showdown's once-per-battle transform counters.
+ * Doubles move requests repeat `canMegaEvo` / `canTerastallize` / ... on
+ * every active slot, but `side.ts` rejects a second `mega` / `ultra` /
+ * `dynamax` / `terastallize` / `zmove` inside the same choice
+ * ("You can only mega-evolve once per battle"). Mirror of
+ * `RandomEngine`'s `transformsUsed`.
+ */
+type TransformClaims = Set<"mega" | "ultra" | "dynamax" | "tera" | "zmove">;
+
+/** Maps a {@link chooseTransform} suffix to its shared claim counter. */
+const TRANSFORM_SUFFIX_CLAIMS: Record<string, "mega" | "ultra" | "dynamax" | "tera" | "zmove"> = {
+	" mega": "mega",
+	" megax": "mega",
+	" megay": "mega",
+	" ultra": "ultra",
+	" dynamax": "dynamax",
+	" terastallize": "tera",
+	" zmove": "zmove",
+};
+
+/**
  * Default heuristic engine. Stateless (state lives on `EngineContext`).
  */
 export class HeuristicEngine implements Engine {
@@ -214,10 +235,11 @@ export class HeuristicEngine implements Engine {
 		const side = request.side;
 		if (!side || !request.active || !tracker) return "default";
 
+		const transformsUsed: TransformClaims = new Set();
 		const decisions: string[] = request.active.map((active, slotIndex) => {
 			const sideMon = side.pokemon[slotIndex];
 			if (!sideMon || sideMon.condition.endsWith(" fnt")) return "pass";
-			return this.decideForSlot(request, ctx, tracker, slotIndex, active);
+			return this.decideForSlot(request, ctx, tracker, slotIndex, active, transformsUsed);
 		});
 		return decisions.join(", ");
 	}
@@ -227,7 +249,8 @@ export class HeuristicEngine implements Engine {
 		ctx: EngineContext,
 		tracker: BattleStateTracker,
 		slotIndex: number,
-		active: PokemonMoveRequestData
+		active: PokemonMoveRequestData,
+		transformsUsed: TransformClaims
 	): string {
 		const side = request.side;
 		const sideMon = side.pokemon[slotIndex];
@@ -308,7 +331,9 @@ export class HeuristicEngine implements Engine {
 		if (monId) ctx.lastMoveByMon.set(monId, chosen.id);
 
 		// 7. Format command (with target for doubles).
-		return this.formatMoveCommand(active, chosen.id, slotIndex, request, ctx, tracker, myMon);
+		return this.formatMoveCommand(
+			active, chosen.id, slotIndex, request, ctx, tracker, myMon, transformsUsed
+		);
 	}
 
 	/**
@@ -591,12 +616,14 @@ export class HeuristicEngine implements Engine {
 		request: MoveRequest,
 		ctx: EngineContext,
 		tracker: BattleStateTracker,
-		myMon: TrackedPokemon
+		myMon: TrackedPokemon,
+		transformsUsed: TransformClaims
 	): string {
 		const idx = this.moveCommandIndex(active, moveId);
 		// Decide whether to consume a one-shot transformation (Tera/
 		// Mega/Z/Dynamax). The transform decision needs to know which
-		// move we picked, so we compute it after move selection.
+		// move we picked, so we compute it after move selection. Only
+		// one slot per request may claim each transform counter.
 		let suffix = "";
 		const foeMon = tracker.foeActive;
 		if (foeMon) {
@@ -607,7 +634,11 @@ export class HeuristicEngine implements Engine {
 				active,
 				chosenMoveId: moveId,
 			});
-			if (transform) suffix = transform.suffix;
+			const claim = transform ? TRANSFORM_SUFFIX_CLAIMS[transform.suffix] : undefined;
+			if (transform && claim && !transformsUsed.has(claim)) {
+				suffix = transform.suffix;
+				transformsUsed.add(claim);
+			}
 		}
 		if (request.active.length <= 1) return `move ${idx}${suffix}`;
 		const move = moveOf(moveId);
