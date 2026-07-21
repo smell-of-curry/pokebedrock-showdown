@@ -18,9 +18,11 @@
  *   pick those up directly via the tracker. Otherwise, we limit guesses
  *   to legal abilities (`Dex.species.get(...).abilities`).
  * - **Move-set inference:** revealed moves come from the tracker; for
- *   the rest, we sample a uniform prior over the species' learnset as
- *   available in `Dex.data.Learnsets`. This module does not currently
- *   intersect that learnset with the active format's legal move pool.
+ *   the rest, we sample a uniform prior over the moves the species can
+ *   legally know *in the current gen at the mon's level* (level-up
+ *   moves above its level are excluded; machine / tutor / egg sources
+ *   are level-free). Species without current-gen learnset data fall
+ *   back to the full multi-gen learnset.
  *
  * The output is always a probability distribution over moves /
  * abilities / items, never a single guess. Search engines (one-ply,
@@ -71,7 +73,7 @@ export function inferFoeActive(tracker: BattleStateTracker): FoeInference | null
 
 /** Inference for an arbitrary tracked Pokemon (any side). */
 export function inferMon(tracker: BattleStateTracker, mon: TrackedPokemon): FoeInference {
-	const moves = inferMoves(mon);
+	const moves = inferMoves(mon, tracker.gen);
 	const abilities = inferAbilities(mon);
 	const items = inferItems(tracker, mon);
 	const hasBoots = (mon.item ? toID(mon.item) === "heavydutyboots" : (items.get("heavydutyboots") ?? 0) > 0.5);
@@ -97,10 +99,10 @@ export function topMoves(inf: FoeInference, n: number): string[] {
 // Internals
 // -----------------------------------------------------------------------
 
-/** Cache of legal-move arrays per species id. */
-const learnsetCache = new Map<string, string[]>();
+/** Cache of parsed learnsets per `${speciesId}|${gen}`. */
+const learnsetCache = new Map<string, LearnableMove[]>();
 
-function inferMoves(mon: TrackedPokemon): Distribution {
+function inferMoves(mon: TrackedPokemon, gen: number): Distribution {
 	const dist: Distribution = new Map();
 	// Revealed moves get high mass.
 	const revealed = Array.from(mon.revealedMoves);
@@ -114,7 +116,7 @@ function inferMoves(mon: TrackedPokemon): Distribution {
 		dist.set(id, revealedShare / Math.max(1, revealed.length));
 	}
 	// Spread `remaining` over the species' legal moves we haven't seen yet.
-	const learnset = legalMoves(mon.species);
+	const learnset = legalMoves(mon, gen);
 	const unseen = learnset.filter(m => !revealed.includes(m));
 	if (unseen.length === 0) {
 		// No unseen moves to absorb the remaining mass — renormalize the
@@ -136,6 +138,18 @@ function inferMoves(mon: TrackedPokemon): Distribution {
 	return dist;
 }
 
+/**
+ * Type-immunity abilities the `|-immune|` log signal can implicate,
+ * keyed by the immune move type. Shared by ability and item inference.
+ */
+const IMMUNITY_ABILITIES: Record<string, string[]> = {
+	Ground: ["levitate", "eartheater"],
+	Fire: ["flashfire", "wellbakedbody"],
+	Water: ["waterabsorb", "stormdrain", "dryskin"],
+	Electric: ["voltabsorb", "lightningrod", "motordrive"],
+	Grass: ["sapsipper"],
+};
+
 function inferAbilities(mon: TrackedPokemon): Distribution {
 	const dist: Distribution = new Map();
 	if (mon.ability) {
@@ -150,6 +164,24 @@ function inferAbilities(mon: TrackedPokemon): Distribution {
 	const choices = uniqueAbilityIds(species);
 	if (choices.length === 0) {
 		dist.set("", 1);
+		return dist;
+	}
+	// An observed unexplained immunity (tracker `|-immune|` analysis)
+	// pins the ability hard when the species can legally carry a
+	// matching immunity ability — e.g. a Ground "miss" on a non-Flying
+	// Bronzong is Levitate, full stop.
+	for (const type of mon.inferredImmunities) {
+		const candidates = IMMUNITY_ABILITIES[type]?.filter(a => choices.includes(a));
+		if (!candidates?.length) continue;
+		const rest = choices.filter(c => !candidates.includes(c));
+		if (rest.length === 0) {
+			// Every legal ability is an immunity candidate — spread the full
+			// mass over them so the distribution still sums to 1.
+			for (const id of candidates) dist.set(id, 1 / candidates.length);
+		} else {
+			for (const id of candidates) dist.set(id, 0.9 / candidates.length);
+			for (const id of rest) dist.set(id, 0.1 / rest.length);
+		}
 		return dist;
 	}
 	const per = 1 / choices.length;
@@ -194,9 +226,16 @@ function inferItems(tracker: BattleStateTracker, mon: TrackedPokemon): Distribut
 	if (species?.exists && species.nfe) evioliteScore += 0.6;
 
 	// Air Balloon: tracker emits `|-item|airballoon|` when the user is
-	// hit — we don't get a *miss* signal for ground moves currently, so
-	// we only weight balloon when the species is commonly seen with it.
-	if (species?.exists) {
+	// hit; before that the strongest signal is an *unexplained* Ground
+	// immunity from the `|-immune|` analysis — when the species can't
+	// legally run Levitate / Earth Eater, the balloon is the only
+	// remaining explanation. Otherwise fall back to the weak
+	// species-typing prior.
+	if (mon.inferredImmunities.has("Ground")) {
+		const legal = species?.exists ? uniqueAbilityIds(species) : [];
+		const abilityExplains = legal.some(a => IMMUNITY_ABILITIES.Ground.includes(a));
+		if (!abilityExplains) balloonScore += 0.8;
+	} else if (species?.exists) {
 		const tagged = species.types.includes("Electric") || species.types.includes("Steel");
 		if (tagged) balloonScore += 0.05;
 	}
@@ -226,29 +265,80 @@ function inferItems(tracker: BattleStateTracker, mon: TrackedPokemon): Distribut
 	return dist;
 }
 
-function legalMoves(species: string): string[] {
-	const id = toID(species);
-	const cached = learnsetCache.get(id);
+/** One learnable move with its current-gen availability. */
+interface LearnableMove {
+	id: string;
+	/** True when the move has at least one current-gen learn source. */
+	inGen: boolean;
+	/**
+	 * Lowest level the move becomes available at in the current gen.
+	 * 0 for level-free sources (machine / tutor / egg / event).
+	 */
+	minLevel: number;
+}
+
+/**
+ * Parse the species' learnset into {@link LearnableMove} records,
+ * cached per species+gen. Showdown stores learnsets by the *base*
+ * species (cosmetic forms share); sources are encoded like `9L36`
+ * (gen 9, level-up at 36), `9M` (machine), `8T` (tutor), `9E` (egg).
+ *
+ * @param species The species name or id to look up.
+ * @param gen The battle's generation, used to gate current-gen sources
+ *   and cache the parsed learnset per gen.
+ * @returns Every dex-valid move the species can know in any gen, with
+ *   current-gen availability metadata.
+ */
+function learnableMoves(species: string, gen: number): LearnableMove[] {
+	const key = `${toID(species)}|${gen}`;
+	const cached = learnsetCache.get(key);
 	if (cached) return cached;
-	const result: string[] = [];
+	const result: LearnableMove[] = [];
 	const speciesObj = Dex.species.get(species);
 	if (!speciesObj?.exists) {
-		learnsetCache.set(id, result);
+		learnsetCache.set(key, result);
 		return result;
 	}
-	// Showdown stores learnsets by the *base* species (cosmetic forms
-	// share). We pull the dex's learnset map and accept anything from any
-	// gen the mon could have learned — close enough for inference.
 	const data = (Dex as unknown as { data: { Learnsets?: Record<string, { learnset?: Record<string, string[]> }> } }).data;
-	const ls = data?.Learnsets?.[id]?.learnset ?? data?.Learnsets?.[toID(speciesObj.baseSpecies)]?.learnset;
+	const ls = data?.Learnsets?.[toID(species)]?.learnset ??
+		data?.Learnsets?.[toID(speciesObj.baseSpecies)]?.learnset;
 	if (ls) {
-		for (const moveId of Object.keys(ls)) {
+		for (const [moveId, sources] of Object.entries(ls)) {
 			const mv: Move | undefined = Dex.moves.get(moveId);
-			if (mv?.exists) result.push(moveId);
+			if (!mv?.exists) continue;
+			let inGen = false;
+			let minLevel = Infinity;
+			for (const source of sources) {
+				const m = /^(\d+)([A-Z])(\d*)/.exec(source);
+				if (!m || parseInt(m[1]) !== gen) continue;
+				inGen = true;
+				const levelGate = m[2] === "L" ? parseInt(m[3]) || 0 : 0;
+				if (levelGate < minLevel) minLevel = levelGate;
+				if (minLevel === 0) break;
+			}
+			result.push({ id: moveId, inGen, minLevel: inGen ? minLevel : 0 });
 		}
 	}
-	learnsetCache.set(id, result);
+	learnsetCache.set(key, result);
 	return result;
+}
+
+/**
+ * Moves `mon` could legally know right now: current-gen sources only,
+ * with level-up moves above the mon's level excluded. Falls back to
+ * the full multi-gen learnset when the species has no current-gen
+ * data at all (custom formats / modded species).
+ *
+ * @param mon The tracked Pokemon whose move pool we're estimating.
+ * @param gen The battle's generation, threaded to the learnset lookup.
+ * @returns Legal move ids for the prior distribution.
+ */
+function legalMoves(mon: TrackedPokemon, gen: number): string[] {
+	const all = learnableMoves(mon.species, gen);
+	const inGen = all.filter(m => m.inGen);
+	const pool = inGen.length > 0 ? inGen : all;
+	const level = mon.level || 100;
+	return pool.filter(m => m.minLevel <= level).map(m => m.id);
 }
 
 function uniqueAbilityIds(species: Species): string[] {
