@@ -17,7 +17,7 @@
     "better-sqlite3": "^11.10.0",
     "cloud-env": "^0.2.3",
     "githubhook": "^1.9.3",
-    "nodemailer": "^8.0.5",
+    "nodemailer": "^9.0.3",
     "permessage-deflate": "^0.1.7",
     "pg": "^8.16.3",
     "probe-image-size": "^7.2.3",
@@ -30,7 +30,9 @@
     "node-oom-heapdump": "^1.2.0"
   },
   "overrides": {
-    "tar": "^7.5.13",
+    "tar": "^7.5.21",
+    "uuid": "^11.1.1",
+    "nodemailer": "^9.0.3",
     "@tootallnate/once": "^3.0.1",
     "serialize-javascript": "^7.0.5",
     "diff": "^8.0.3"
