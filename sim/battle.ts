@@ -3349,19 +3349,23 @@ export class Battle {
 		this.sentLogPos = this.log.length;
 
 		if (!this.sentEnd && this.ended) {
+			// sides is prefilled with null until >player registers; force-tie
+			// before both sides join must not throw on .name / .team / .pokemonLeft.
+			// p1/p2 stay present (BEH IEndLogMessage requires string/array/number);
+			// p3/p4 keep optional chaining (undefined → omitted / deleted below).
 			const log = {
 				winner: this.winner,
 				seed: this.prngSeed,
 				turns: this.turn,
-				p1: this.sides[0].name,
-				p2: this.sides[1].name,
+				p1: this.sides[0]?.name ?? '',
+				p2: this.sides[1]?.name ?? '',
 				p3: this.sides[2]?.name,
 				p4: this.sides[3]?.name,
-				p1team: this.sides[0].team,
-				p2team: this.sides[1].team,
+				p1team: this.sides[0]?.team ?? [],
+				p2team: this.sides[1]?.team ?? [],
 				p3team: this.sides[2]?.team,
 				p4team: this.sides[3]?.team,
-				score: [this.sides[0].pokemonLeft, this.sides[1].pokemonLeft],
+				score: [this.sides[0]?.pokemonLeft ?? 0, this.sides[1]?.pokemonLeft ?? 0],
 				inputLog: this.inputLog,
 			};
 			if (this.sides[2]) {

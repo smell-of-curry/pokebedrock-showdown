@@ -101,6 +101,11 @@ export class RandomEngine implements Engine {
 		const chosenSlots: number[] = [];
 		const commands = mustSwitchFlags.map((mustSwitch, slotIndex) => {
 			if (!mustSwitch) return "pass";
+			// Revival Blessing sets `reviving` on the *active caster* slot
+			// (sim/pokemon.ts getSwitchRequestData), never on the fainted
+			// bench target — a reviving slot must pick a fainted bench mon,
+			// a normal force-switch must pick a living one.
+			const reviving = !!pokemon[slotIndex]?.reviving;
 			const validSwitches = range(1, pokemon.length).filter(benchSlot => {
 				const benchPoke = pokemon[benchSlot - 1];
 				if (!benchPoke) return false;
@@ -110,7 +115,7 @@ export class RandomEngine implements Engine {
 				if (benchPoke.active) return false;
 				if (chosenSlots.includes(benchSlot)) return false;
 				const fainted = benchPoke.condition.endsWith(" fnt");
-				if (fainted && !benchPoke.reviving) return false;
+				if (reviving ? !fainted : fainted) return false;
 				return true;
 			});
 			if (!validSwitches.length) return "pass";

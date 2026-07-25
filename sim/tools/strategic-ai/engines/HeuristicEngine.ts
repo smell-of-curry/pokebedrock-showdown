@@ -191,10 +191,16 @@ export class HeuristicEngine implements Engine {
 	/**
 	 * Pick a switch-in for every slot the simulator has flagged in
 	 * `forceSwitch`. The hard requirement is "every flagged slot must
-	 * answer with `switch N` for some non-active, non-fainted bench
-	 * Pokemon, or `pass` if (and only if) no such Pokemon exists" —
-	 * showdown rejects `pass` otherwise and the resulting error loop
-	 * eventually trips the host's safety valve into a forced tie.
+	 * answer with `switch N` for some non-active legal bench Pokemon,
+	 * or `pass` if (and only if) no such Pokemon exists" — showdown
+	 * rejects `pass` otherwise and the resulting error loop eventually
+	 * trips the host's safety valve into a forced tie.
+	 *
+	 * Revival Blessing sets `reviving` on the *active* caster slot; that
+	 * slot must target a fainted bench mon (once). Normal force-switches
+	 * still require a living bench mon. Mirror RandomEngine / upstream
+	 * random-player-ai: allow fainted iff the choosing slot is reviving,
+	 * and never reuse a bench slot already claimed this request.
 	 *
 	 * That means the candidate set must be built from `request.side`
 	 * directly. The tracker is only consulted to *rank* the candidates;
@@ -213,8 +219,10 @@ export class HeuristicEngine implements Engine {
 		const foeActive = tracker?.foeActive ?? null;
 
 		const taken = new Set<number>();
-		const actions = slots.map(needsSwitch => {
+		const actions = slots.map((needsSwitch, slotIndex) => {
 			if (!needsSwitch) return "pass";
+			// Active caster flag — not set on the fainted revive target.
+			const reviving = !!side.pokemon[slotIndex]?.reviving;
 
 			interface RawCandidate {
 				req: PokemonSwitchRequestData;
@@ -225,7 +233,10 @@ export class HeuristicEngine implements Engine {
 			const candidates: RawCandidate[] = [];
 			for (let i = 0; i < side.pokemon.length; i++) {
 				const p = side.pokemon[i];
-				if (!p || p.active || p.condition.endsWith(" fnt")) continue;
+				if (!p || p.active) continue;
+				const fainted = p.condition.endsWith(" fnt");
+				// reviving XOR living: revival → fainted only; else → living only
+				if (reviving ? !fainted : fainted) continue;
 				if (taken.has(i + 1)) continue;
 				const mon = tracker ?
 					this.resolveTrackedFromRequest(p, ctx, tracker.mySide) :
@@ -233,7 +244,7 @@ export class HeuristicEngine implements Engine {
 				candidates.push({ req: p, idx: i + 1, mon });
 			}
 
-			// Genuinely no live bench mon — fine to pass.
+			// No legal bench target for this slot — fine to pass.
 			if (!candidates.length) return "pass";
 
 			let pickIdx = candidates[0].idx;
