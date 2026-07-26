@@ -81,10 +81,39 @@ const ROLLOUT_HALF_WEIGHT_VISITS = 6;
  * variance than pure prior sampling.
  */
 const GREEDY_FOE_REPLY_CHANCE = 0.65;
-/** Fork-eval penalty per non-volatile status on a living mon. */
-const STATUS_EVAL_PENALTY = 0.12;
-/** Fork-eval value per net stat-boost stage on an active mon. */
-const BOOST_EVAL_VALUE = 0.04;
+/**
+ * Fork-eval penalty per non-volatile status on a living mon, in the same
+ * "mons" units as {@link evaluateForkState} (a living mon at full HP is
+ * worth ~1.3).
+ *
+ * Differentiated because a flat penalty made every status equivalent to
+ * ~4% of a Pokemon, so a rollout that landed Spore scored barely above
+ * one that wasted the turn — and with the rollout carrying up to
+ * {@link ROLLOUT_MAX_WEIGHT} of the final score, tier 5 talked itself out
+ * of support moves that tier 4 (no rollouts) played correctly.
+ *
+ * Sleep is by far the largest: the target loses its next 1-3 turns
+ * outright. Freeze would be larger still but is too rare to matter.
+ */
+const STATUS_EVAL_PENALTY: { [status: string]: number } = {
+	slp: 0.5,
+	frz: 0.5,
+	tox: 0.35,
+	par: 0.3,
+	brn: 0.3,
+	psn: 0.22,
+};
+/** Fallback penalty for a status not listed in {@link STATUS_EVAL_PENALTY}. */
+const DEFAULT_STATUS_EVAL_PENALTY = 0.2;
+/**
+ * Fork-eval value per net stat-boost stage on an active mon.
+ *
+ * A single offensive stage is +50% damage output, which cashes out at
+ * roughly a sixth of a Pokemon over the turns a boosted mon survives —
+ * so the old 0.04 undervalued setup by about 3x and rollouts scored a
+ * Swords Dance turn as a straight tempo loss.
+ */
+const BOOST_EVAL_VALUE = 0.13;
 /** Max fork rollouts per arm of a stay-vs-switch comparison. */
 const SWITCH_EVAL_ROLLOUTS = 5;
 /** Fraction of the search budget the switch comparison may consume. */
@@ -197,11 +226,8 @@ export class MctsEngine extends OnePlySearchEngine {
 			const meanReward = n.visits > 0 ? n.totalReward / n.visits : heuristic;
 			const rolloutWeight = ROLLOUT_MAX_WEIGHT *
 				n.visits / (n.visits + ROLLOUT_HALF_WEIGHT_VISITS);
-			let score = (1 - rolloutWeight) * heuristic + rolloutWeight * meanReward;
-			if (ctx.infoForgetting > 0 && evalCtx.defender.revealedMoves.size > 0 &&
-				ctx.prng.random() < ctx.infoForgetting) {
-				score *= 0.85;
-			}
+			// No score-scaling for forgetting; see `InfoForgetting`.
+			const score = (1 - rolloutWeight) * heuristic + rolloutWeight * meanReward;
 			return { opt: { id: n.id, idx: n.idx }, score };
 		});
 	}
@@ -400,7 +426,14 @@ function sampleRollout(
 		reward += 30 * ourCalc.koProbability;
 	} else {
 		// Status move: use the heuristic move-evaluator score as a stand-in.
-		reward += evaluateMove(ourMove, evalCtx).score * 0.3;
+		// Passed through at full weight because both sides of this branch
+		// are already on the same scale — `MoveEvaluator` prices a
+		// damaging move at roughly `100 x` the HP fraction it deals, which
+		// is exactly what the `ourCalc` branch computes. The old 0.3
+		// factor was an unexplained third-of-a-vote that made every
+		// support move look like a wasted turn *only* at tier 5, which is
+		// where players reported the AI "just attacking".
+		reward += evaluateMove(ourMove, evalCtx).score;
 	}
 	if (foeCalc) {
 		const myMaxHp = foeCalc.defenderMaxHp || 1;
@@ -719,7 +752,9 @@ function evaluateForkState(fork: Battle, mySide: Side): number {
 		for (const p of side.pokemon) {
 			const hpFraction = p.maxhp > 0 ? p.hp / p.maxhp : 0;
 			let value = hpFraction + (p.hp > 0 ? 0.3 : 0);
-			if (p.hp > 0 && p.status) value -= STATUS_EVAL_PENALTY;
+			if (p.hp > 0 && p.status) {
+				value -= STATUS_EVAL_PENALTY[p.status] ?? DEFAULT_STATUS_EVAL_PENALTY;
+			}
 			score += sign * value;
 		}
 		const active = side.active[0];

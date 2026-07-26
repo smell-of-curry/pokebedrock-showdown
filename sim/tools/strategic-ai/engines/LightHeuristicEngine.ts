@@ -17,6 +17,8 @@
  * @license MIT
  */
 import { Dex, toID } from "../../../dex";
+import type { Move } from "../../../dex-moves";
+import { abilityBlocksMoveType } from "../mechanics/DamageCalc";
 import type {
 	ChoiceRequest,
 	MoveRequest,
@@ -33,6 +35,8 @@ const SWITCH_OUT_HP = 0.3;
 const SWITCH_OUT_MATCHUP = -3;
 const SWITCH_LOCK_TURNS = 2;
 const PROTECT_CHANCE = 0.15;
+/** Score for a damaging move the target takes no damage from. */
+const NO_EFFECT_SCORE = -60;
 
 const TYPE_MATCHUP_WEIGHT = 2.5;
 const SPEED_TIER_COEFF = 4.0;
@@ -179,8 +183,12 @@ export class LightHeuristicEngine implements Engine {
 				second = m;
 			}
 		}
-		// Avoid repeating the same move when alternatives are close.
-		if (second && best.id === lastMoveId && secondScore >= 0.9 * bestScore) {
+		// Avoid repeating the same move when alternatives are close. Only
+		// meaningful for a positive best score: at 0 or below, `0.9 *
+		// bestScore` is not a "within 10%" test any more, and the swap
+		// would trade a useless move for an equally useless one — which
+		// is how an immune move got picked.
+		if (second && best.id === lastMoveId && bestScore > 0 && secondScore >= 0.9 * bestScore) {
 			best = second;
 		}
 
@@ -254,6 +262,10 @@ export class LightHeuristicEngine implements Engine {
 		if (!foe) return move.basePower || 0;
 		// Simple damage estimate.
 		const dmg = simpleDamage(move, me, foe, ctx.tracker?.field.weather ?? "");
+		// A damaging move that deals nothing (type or ability immunity)
+		// must score below every useful option, not tie with them at 0 —
+		// otherwise the anti-staleness swap below can land on it.
+		if (dmg <= 0) return NO_EFFECT_SCORE;
 		const foeHp = parseCurrentHp(foe.condition);
 		let value = dmg * 0.8;
 		if (dmg >= foeHp) value += 40;
@@ -350,12 +362,22 @@ function scoreStatusMoveLight(
 }
 
 function simpleDamage(
-	move: { basePower: number, category: string, type: string, multihit?: number | number[] },
+	move: {
+		basePower: number,
+		category: string,
+		type: string,
+		multihit?: number | number[],
+		flags?: Move["flags"],
+	},
 	atk: PokemonSwitchRequestData,
 	def: PokemonSwitchRequestData,
 	weather: string
 ): number {
 	if (!move.basePower) return 0;
+	// Ability immunity is invisible to the type chart, so without this a
+	// Ground move scores full damage into a Levitate mon and gets clicked.
+	const defAbility = def.ability || def.baseAbility || "";
+	if (abilityBlocksMoveType(defAbility, move.type, move)) return 0;
 	let bp = move.basePower;
 	if (move.multihit) {
 		if (Array.isArray(move.multihit)) {

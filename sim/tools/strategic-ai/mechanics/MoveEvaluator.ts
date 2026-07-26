@@ -29,6 +29,51 @@ import {
 } from "./DamageCalc";
 
 /**
+ * Score for a move whose target is immune to it.
+ *
+ * Strongly negative rather than 0 so it always loses to a real option,
+ * and so a same-sign score ladder (see `selectByScoreLadder`) can never
+ * walk from a positive move into an immune one. Still finite, so a mon
+ * left with nothing but immune moves picks one and moves on instead of
+ * falling through to `"default"`.
+ */
+const IMMUNE_MOVE_SCORE = -60;
+
+/**
+ * Most turns of future payoff a setup move is allowed to bank on.
+ *
+ * Without a cap, a boost against a foe that barely scratches us projects
+ * an unbounded number of attacking turns and the AI would set up
+ * forever. Four is about as far ahead as the "nothing changes" premise
+ * holds — past that the foe has switched or found an answer.
+ */
+const SETUP_TURN_CAP = 4;
+
+/**
+ * Haircut applied to projected setup payoff.
+ *
+ * The projection assumes the matchup stays put; in practice the foe
+ * switches, we get statused or flinched, or they simply KO us a turn
+ * earlier than the average roll suggested. Half credit keeps setup
+ * competitive with attacking without making it the default.
+ */
+const SETUP_DISCOUNT = 0.5;
+
+/**
+ * Utility of putting a healthy foe to sleep, before the accuracy
+ * discount in {@link applyStatusAccuracy} and the bulk scaling in
+ * {@link scoreStatusInfliction}.
+ *
+ * Sized against the damage path, which scores roughly `100 x` the HP
+ * fraction dealt: sleep is worth about as much as a strong neutral hit
+ * because the free turns it buys convert into exactly that. Spore ends
+ * up around 30 (100% accurate), Hypnosis around 18 (60%) — so the AI
+ * reaches for the reliable one and still prefers a clean KO over
+ * either.
+ */
+const SLEEP_BASE_VALUE = 34;
+
+/**
  * What a single move evaluation needs to know about the world. Designed
  * to be cheap to fill in from a `BattleStateTracker` plus a
  * `MoveRequest` slot.
@@ -105,7 +150,13 @@ export function evaluateMove(
 		if (evaluation) return evaluation;
 	}
 	if (m.category === "Status") {
-		return evaluateStatus(m, moveId, ctx);
+		// A status move the target simply cannot be affected by is the
+		// same class of mistake as clicking a move it's immune to, and
+		// players read it the same way. Reject it before the per-effect
+		// scoring can hand out any bonuses.
+		const blocked = statusMoveBlockedBy(m, moveId, ctx);
+		if (blocked) return { moveId, score: IMMUNE_MOVE_SCORE, rationale: `blocked:${blocked}` };
+		return applyStatusAccuracy(m, evaluateStatus(m, moveId, ctx), ctx);
 	}
 	const { tracker, attacker, defender } = ctx;
 	const calc = calculateDamage({
@@ -127,6 +178,15 @@ export function evaluateMove(
 		// committed to attacking this turn".
 		defenderTookDamageThisTurn: ctx.defenderTookDamageThisTurn ?? false,
 	});
+	// A move the target is immune to accomplishes literally nothing: it
+	// wastes the turn, reveals the move, and leaves us to eat the reply.
+	// Reject it outright rather than letting the additive bonuses below
+	// (priority, pivot, hazard removal) lift it back above 0 — that is
+	// how a Ground move ends up clicked into a Levitate mon, or Sucker
+	// Punch into a Ghost, until the user faints.
+	if (calc.immune) {
+		return { moveId, score: IMMUNE_MOVE_SCORE, damage: calc, rationale: "immune" };
+	}
 	const maxHp = calc.defenderMaxHp || estimateMaxHp(fromTracked(defender));
 	const damageScore = (calc.avgDamage / Math.max(1, maxHp)) * 100; // 0..100ish
 	let score = damageScore * calc.hitChance;
@@ -225,6 +285,159 @@ export function evaluateMove(
 		}
 	}
 	return { moveId, score, damage: calc, rationale };
+}
+
+/** `Move.target` values that aim at an opposing Pokemon. */
+const FOE_TARGETS = new Set([
+	"normal", "any", "randomNormal", "adjacentFoe",
+	"allAdjacentFoes", "allAdjacent", "scripted",
+]);
+
+/**
+ * Discount a status move's utility by the chance it actually connects.
+ *
+ * The damage path multiplies through `calc.hitChance`, but every branch
+ * of {@link evaluateStatus} returned a raw utility, so Hypnosis (60%)
+ * and Sing (55%) were priced identically to Spore (100%) and Thunder
+ * Wave to Zap Cannon. Clicking a coin-flip status where a reliable one
+ * (or an attack) was available is one of the "ineffective move" cases
+ * players notice.
+ *
+ * Self-, ally- and side-targeting moves (setup, recovery, hazards,
+ * screens) have `accuracy: true` and are untouched.
+ *
+ * Only positive scores are scaled. Shrinking a negative score toward
+ * zero would *promote* a bad move as its accuracy drops — the same
+ * inversion bug that the old score-scaling info-forgetting had.
+ *
+ * @param move The status move being considered.
+ * @param evaluation The raw evaluation from {@link evaluateStatus}.
+ * @param ctx The move evaluation context.
+ * @returns The evaluation with `score` discounted by hit chance.
+ */
+function applyStatusAccuracy(
+	move: Move,
+	evaluation: MoveEvaluation,
+	ctx: MoveEvalContext
+): MoveEvaluation {
+	if (evaluation.score <= 0) return evaluation;
+	if (move.accuracy === true) return evaluation;
+	let accuracy = move.accuracy / 100;
+	// No Guard on either side, and Gravity, make the move land anyway.
+	const noGuard = toID(ctx.attacker.ability) === "noguard" ||
+		toID(ctx.defender.ability) === "noguard";
+	if (noGuard) accuracy = 1;
+	else if (ctx.tracker.field.gravity) accuracy = Math.min(1, accuracy * (1 / 0.6));
+	if (accuracy >= 1) return evaluation;
+	return { ...evaluation, score: evaluation.score * accuracy };
+}
+
+/** Types that are flatly immune to a given non-volatile status. */
+const STATUS_IMMUNE_TYPES: { [status: string]: string[] } = {
+	psn: ["Steel", "Poison"],
+	tox: ["Steel", "Poison"],
+	brn: ["Fire"],
+	par: ["Electric"],
+};
+
+/** Per-status ability immunities, keyed by status id. */
+const STATUS_IMMUNE_ABILITIES: { [status: string]: Set<string> } = {
+	psn: new Set(["immunity", "pastelveil"]),
+	tox: new Set(["immunity", "pastelveil"]),
+	brn: new Set(["waterveil", "waterbubble", "thermalexchange"]),
+	par: new Set(["limber"]),
+	slp: new Set(["insomnia", "vitalspirit", "sweetveil"]),
+	frz: new Set(["magmaarmor"]),
+};
+
+/** Abilities that shrug off every non-volatile status. */
+const ALL_STATUS_IMMUNE_ABILITIES = new Set(["comatose", "purifyingsalt", "shieldsdown"]);
+
+/**
+ * Reasons a status move aimed at the foe will do literally nothing.
+ *
+ * The damage path already refuses type- and ability-immune attacks, but
+ * status moves bypass it entirely, so nothing stopped the AI from
+ * clicking Toxic into a Substitute, Will-O-Wisp into Water Veil, or
+ * anything at all into Gholdengo. To a player those are the same
+ * mistake as an immune attack.
+ *
+ * Self-, ally-, and side-targeting moves are never blocked here — they
+ * don't interact with the foe at all.
+ *
+ * @param move The status move being considered.
+ * @param moveId The move's id.
+ * @param ctx The move evaluation context.
+ * @returns A short reason tag when the move cannot affect the target, or
+ * `null` when it can (or when we can't prove otherwise).
+ */
+function statusMoveBlockedBy(
+	move: Move,
+	moveId: string,
+	ctx: MoveEvalContext
+): string | null {
+	if (!FOE_TARGETS.has(move.target)) return null;
+	const { defender, attacker, tracker } = ctx;
+	const foeAbility = toID(defender.ability || "");
+	const foeItem = toID(defender.item || "");
+	// Infiltrator sees through the foe's Substitute and Safeguard, so
+	// every "we're walled by a barrier" check below has to respect it.
+	const infiltrator = toID(attacker.ability || "") === "infiltrator";
+
+	// Good as Gold: no status move from an opponent ever connects.
+	if (foeAbility === "goodasgold") return "goodasgold";
+	// Magic Bounce returns the move at us, which is worse than passing.
+	if (foeAbility === "magicbounce" && move.flags?.reflectable) return "magicbounce";
+	// Powder moves miss Grass types, Overcoat, and Safety Goggles.
+	if (move.flags?.powder) {
+		if (defender.types.includes("Grass")) return "powderGrass";
+		if (foeAbility === "overcoat") return "overcoat";
+		if (foeItem === "safetygoggles") return "safetygoggles";
+	}
+	// Substitute eats anything that doesn't explicitly punch through it.
+	if (
+		defender.volatiles.has("substitute") && !infiltrator &&
+		!move.flags?.bypasssub && !move.flags?.sound
+	) {
+		return "substitute";
+	}
+	// Type immunity, but only for the handful of status moves that opt
+	// into the type chart (`ignoreImmunity: false`, e.g. Thunder Wave).
+	// The rest deliberately ignore it.
+	if (move.ignoreImmunity === false && !Dex.getImmunity(move.type, defender.types)) {
+		return "typeImmune";
+	}
+	// Leech Seed's Grass immunity is a bespoke `onTryImmunity`, not a
+	// flag or a type-chart entry, so it needs naming.
+	if (moveId === "leechseed" && defender.types.includes("Grass")) return "leechGrass";
+	if (moveId === "leechseed" && defender.volatiles.has("leechseed")) return "seeded";
+
+	// Everything past here is specific to inflicting a status.
+	const status = move.status;
+	if (!status) return null;
+	if (defender.status) return "alreadyStatused";
+	if (ALL_STATUS_IMMUNE_ABILITIES.has(foeAbility)) return foeAbility;
+	if (STATUS_IMMUNE_ABILITIES[status]?.has(foeAbility)) return foeAbility;
+	// Leaf Guard is sun-conditional; Flower Veil covers the whole side
+	// but we only model the active target.
+	const sun = tracker.field.weather === "sunnyday" || tracker.field.weather === "desolateland";
+	if (foeAbility === "leafguard" && sun) return "leafguard";
+	if (foeAbility === "flowerveil" && defender.types.includes("Grass")) return "flowerveil";
+	// Safeguard blocks status infliction (but not stat drops), which is
+	// why this check sits below the general-purpose ones.
+	if (tracker.sides[ctx.foeSide].safeguardTurns > 0 && !infiltrator) return "safeguard";
+	if (STATUS_IMMUNE_TYPES[status]?.some(t => defender.types.includes(t))) return "typeStatus";
+	// Terrain: Misty blocks every major status, Electric blocks sleep —
+	// both only on a grounded target, so an airborne foe is still fair
+	// game.
+	if (tracker.isPokemonGrounded(defender)) {
+		const terrain = tracker.field.terrain;
+		if (terrain === "mistyterrain") return "mistyterrain";
+		if (terrain === "electricterrain" && (status === "slp" || moveId === "yawn")) {
+			return "electricterrain";
+		}
+	}
+	return null;
 }
 
 /**
@@ -517,16 +730,28 @@ function scoreBoostMove(
 	let score = 0;
 	let anyMeaningful = false;
 	let boostsSpeed = false;
-	for (const [stat, amount] of Object.entries(boosts)) {
-		if (typeof amount !== "number") continue;
-		const cur = myBoosts[stat] || 0;
-		// Diminishing returns: +1 from 0 is more valuable than +1 from +5.
-		const incremental = amount > 0 ? Math.max(0, 6 - cur) / 6 : 1;
-		const stageValue = stat === "spe" ? 12 : (stat === "atk" || stat === "spa" ? 9 : 6);
-		const contribution = amount * stageValue * incremental;
-		score += contribution;
-		if (contribution >= 4) anyMeaningful = true;
-		if (stat === "spe" && amount > 0 && cur < 6) boostsSpeed = true;
+	// Preferred model: price the boost as the extra damage it buys over
+	// the turns we expect to survive. See `projectedSetupValue`.
+	const projected = projectedSetupValue(boosts, ctx);
+	if (projected !== null) {
+		score = projected.value;
+		anyMeaningful = projected.meaningful;
+		boostsSpeed = projected.boostsSpeed;
+	} else {
+		// Fallback for when we can't price it — no damaging move known
+		// for the attacker yet (early in a battle, or a synthetic test
+		// context). Flat per-stage values, with diminishing returns.
+		for (const [stat, amount] of Object.entries(boosts)) {
+			if (typeof amount !== "number") continue;
+			const cur = myBoosts[stat] || 0;
+			// Diminishing returns: +1 from 0 is more valuable than +1 from +5.
+			const incremental = amount > 0 ? Math.max(0, 6 - cur) / 6 : 1;
+			const stageValue = stat === "spe" ? 12 : (stat === "atk" || stat === "spa" ? 9 : 6);
+			const contribution = amount * stageValue * incremental;
+			score += contribution;
+			if (contribution >= 4) anyMeaningful = true;
+			if (stat === "spe" && amount > 0 && cur < 6) boostsSpeed = true;
+		}
 	}
 	if (moveId === "bellydrum") {
 		score = (ctx.attacker.hpFraction ?? 1) >= 0.55 ? 60 : -20;
@@ -558,6 +783,180 @@ function scoreBoostMove(
 		if (boostsSpeed && !ctx.weOutspeed) score += 10;
 	}
 	return score;
+}
+
+/**
+ * Fraction of the foe's max HP our best known damaging move deals, and
+ * the fraction of ours the foe's best known reply deals. Cached per
+ * evaluation context because a mon evaluates several moves per turn
+ * against the same pair.
+ */
+const offenseCache = new WeakMap<MoveEvalContext, { ours: number, theirs: number } | null>();
+
+/**
+ * Stat multiplier for a boost stage, as the simulator applies it.
+ *
+ * @param stage The boost stage, clamped to [-6, 6].
+ * @returns The multiplicative modifier.
+ */
+function boostMultiplier(stage: number): number {
+	const s = Math.max(-6, Math.min(6, stage));
+	return s >= 0 ? (2 + s) / 2 : 2 / (2 - s);
+}
+
+/**
+ * Best expected damage either side can deal right now, as a fraction of
+ * the target's max HP.
+ *
+ * Only moves we've actually seen count. For our own side that's the
+ * whole moveset (the request seeds it), so this is exact; for the foe it
+ * grows as the battle reveals moves, which is the correct amount of
+ * information to plan with.
+ *
+ * @param ctx The evaluation context.
+ * @returns Both damage fractions, or `null` if we know no damaging move
+ * for our own attacker and therefore can't price anything.
+ */
+function offenseProfile(ctx: MoveEvalContext): { ours: number, theirs: number } | null {
+	const cached = offenseCache.get(ctx);
+	if (cached !== undefined) return cached;
+	const ours = bestDamageFraction(ctx, ctx.attacker, ctx.defender, ctx.mySide, ctx.foeSide);
+	const result = ours > 0 ?
+		{
+			ours,
+			theirs: bestDamageFraction(ctx, ctx.defender, ctx.attacker, ctx.foeSide, ctx.mySide),
+		} :
+		null;
+	offenseCache.set(ctx, result);
+	return result;
+}
+
+/**
+ * Highest expected damage fraction across a mon's known damaging moves.
+ *
+ * @param ctx The evaluation context (for field and side state).
+ * @param attacker The attacking mon.
+ * @param defender The defending mon.
+ * @param attackerSide The attacker's tracker side id.
+ * @param defenderSide The defender's tracker side id.
+ * @returns The best `avgDamage / maxHp * hitChance`, or 0 if no known
+ * damaging move connects.
+ */
+function bestDamageFraction(
+	ctx: MoveEvalContext,
+	attacker: TrackedPokemon,
+	defender: TrackedPokemon,
+	attackerSide: MoveEvalContext["mySide"],
+	defenderSide: MoveEvalContext["mySide"]
+): number {
+	let best = 0;
+	for (const moveId of attacker.revealedMoves) {
+		const move = Dex.moves.get(moveId);
+		if (!move?.exists || move.category === "Status" || !move.basePower) continue;
+		const calc = calculateDamage({
+			attacker: fromTracked(attacker),
+			defender: fromTracked(defender),
+			move,
+			field: ctx.tracker.field,
+			attackerSide: ctx.tracker.sides[attackerSide],
+			defenderSide: ctx.tracker.sides[defenderSide],
+			isDoubles: ctx.isDoubles,
+		});
+		const maxHp = calc.defenderMaxHp || estimateMaxHp(fromTracked(defender));
+		const frac = (calc.avgDamage / Math.max(1, maxHp)) * calc.hitChance;
+		if (frac > best) best = frac;
+	}
+	return best;
+}
+
+/**
+ * Price a boost move as the extra damage it buys.
+ *
+ * The old model gave every stage a flat constant (+9 for Attack, +12 for
+ * Speed, ...). On the same scale, a neutral STAB hit scores 30-50, so a
+ * Swords Dance could essentially never win — the AI attacked every turn
+ * and looked like it had no idea support moves existed. But the flat
+ * constant is wrong in both directions: the same Swords Dance is worth
+ * almost nothing when we're about to be KOed, and worth the game when
+ * we're walling the foe.
+ *
+ * So price it properly. An offensive boost multiplies our damage output;
+ * a defensive boost buys turns; both cash out as damage dealt over the
+ * turns we expect to live:
+ *
+ *     value = ourDamagePerTurn * (extra damage multiplier) * turnsLeft
+ *
+ * `turnsLeft` comes from how hard the foe actually hits us, and we spend
+ * this turn setting up rather than attacking, so it's one less than the
+ * number of hits we survive. A discount covers what the model ignores
+ * (the foe switching, getting statused, losing the speed tie).
+ *
+ * @param boosts The stat boosts the move applies to the user.
+ * @param ctx The evaluation context.
+ * @returns The projected value plus flags the caller needs, or `null`
+ * when there isn't enough information to price it.
+ */
+function projectedSetupValue(
+	boosts: { [stat: string]: number | undefined },
+	ctx: MoveEvalContext
+): { value: number, meaningful: boolean, boostsSpeed: boolean } | null {
+	const offense = offenseProfile(ctx);
+	if (!offense) return null;
+	const myBoosts = ctx.attacker.boosts;
+	const myHp = ctx.attacker.hpFraction ?? 1;
+	// Floor the incoming damage: against a foe that can't hurt us the
+	// projection would otherwise run away to infinity, and passive
+	// damage (hazards, weather, poison) is real anyway.
+	const foeDamage = Math.max(0.08, offense.theirs);
+	const hitsSurvived = myHp / foeDamage;
+
+	const physical = (ctx.attacker.stats?.atk ?? 0) >= (ctx.attacker.stats?.spa ?? 0);
+	const offensiveStat = physical ? "atk" : "spa";
+	const defensiveStat = physical ? "def" : "spd";
+
+	let damageMultiplier = 1;
+	let defenceMultiplier = 1;
+	let speedStages = 0;
+	let miscValue = 0;
+	for (const [stat, amount] of Object.entries(boosts)) {
+		if (typeof amount !== "number" || amount === 0) continue;
+		const cur = myBoosts[stat] || 0;
+		const ratio = boostMultiplier(cur + amount) / boostMultiplier(cur);
+		if (stat === offensiveStat) damageMultiplier *= ratio;
+		else if (stat === "atk" || stat === "spa") damageMultiplier *= 1 + ((ratio - 1) * 0.25);
+		else if (stat === defensiveStat) defenceMultiplier *= ratio;
+		else if (stat === "def" || stat === "spd") defenceMultiplier *= 1 + ((ratio - 1) * 0.5);
+		else if (stat === "spe") speedStages += amount;
+		// Accuracy / evasion: small flat credit, they don't fit the model.
+		else miscValue += amount * 3;
+	}
+
+	// Offensive: more damage per turn, for every turn after this one.
+	const attackTurns = Math.max(0, Math.min(SETUP_TURN_CAP, hitsSurvived - 1));
+	const damagePerTurn = offense.ours * 100;
+	let value = damagePerTurn * (damageMultiplier - 1) * attackTurns;
+
+	// Defensive: fewer incoming hits means more turns to attack in.
+	if (defenceMultiplier > 1) {
+		const boostedHitsSurvived = (myHp / (foeDamage / defenceMultiplier)) - 1;
+		const extraTurns = Math.min(SETUP_TURN_CAP, boostedHitsSurvived) - attackTurns;
+		if (extraTurns > 0) value += damagePerTurn * extraTurns;
+	}
+
+	// Speed: worth a turn when it flips the speed tier, and little
+	// otherwise. Flipping it means we attack before taking the hit for
+	// the rest of the matchup, which is roughly one extra attack.
+	if (speedStages > 0 && !ctx.weOutspeed) value += damagePerTurn * 0.8;
+	else if (speedStages > 0) value += damagePerTurn * 0.15 * Math.min(1, speedStages);
+
+	value = (value * SETUP_DISCOUNT) + miscValue;
+	return {
+		value,
+		// "Meaningful" gates the setup-window bonus: a boost we can't
+		// cash in (already maxed, or dying this turn) shouldn't collect it.
+		meaningful: value >= 6,
+		boostsSpeed: speedStages > 0 && (myBoosts.spe || 0) < 6,
+	};
 }
 
 /**
@@ -681,8 +1080,7 @@ function scoreDebuffMove(move: Move, ctx: MoveEvalContext): number {
 }
 
 function scoreStatusInfliction(status: string, ctx: MoveEvalContext): number {
-	const { defender, attacker, tracker } = ctx;
-	if (defender.status) return -10; // Already statused.
+	const { defender, attacker } = ctx;
 	// "Stall combo" detection: status with a follow-up plan (Protect to
 	// burn the timer, Recover/Roost to negate the residual damage
 	// trade, a Defensive boost to outlast). When we have one of those
@@ -705,37 +1103,65 @@ function scoreStatusInfliction(status: string, ctx: MoveEvalContext): number {
 		myMoves.has("cosmicpower") || myMoves.has("acidarmor") ||
 		myMoves.has("calmmind") || myMoves.has("bulkup");
 	const stallComboBonus = (hasProtect ? 4 : 0) + (hasRecovery ? 4 : 0) + (hasDefBoost ? 3 : 0);
-	// Electric/Misty Terrain only block status moves on *grounded*
-	// targets — an airborne / Levitate foe is still a legal target.
-	const grounded = tracker.isPokemonGrounded(defender);
-	const mistyBlocks = grounded && tracker.field.terrain === "mistyterrain";
-	const electricBlocks = grounded && tracker.field.terrain === "electricterrain";
+	// Every "this can't land" case (type, ability, terrain, Safeguard,
+	// Substitute, already-statused) is rejected up-front by
+	// `statusMoveBlockedBy`, so from here it's purely about how much the
+	// status is worth against this target.
 	switch (status) {
 	case "tox":
 	case "psn": {
-		if (defender.types.includes("Steel") || defender.types.includes("Poison")) return -20;
-		// Misty Terrain blocks all major statuses on grounded foes;
-		// don't waste a turn trying.
-		if (mistyBlocks) return -10;
-		return 16 + stallComboBonus;
+		// Poison is a damage-over-time clock: worth much less against a
+		// foe that will faint or force us out long before it ticks.
+		const bulk = defender.hpFraction ?? 1;
+		return 16 * (0.5 + 0.5 * bulk) + stallComboBonus;
 	}
 	case "brn": {
-		if (defender.types.includes("Fire")) return -20;
-		if (mistyBlocks) return -10;
-		return 14 + stallComboBonus;
+		// Burn's halved Attack only matters against a physical threat.
+		const physical = defenderLeansPhysical(defender);
+		return (physical ? 18 : 10) + stallComboBonus;
 	}
 	case "par": {
-		if (defender.types.includes("Electric") || defender.types.includes("Ground")) return -20;
-		if (electricBlocks || mistyBlocks) return -10;
-		return (ctx.weOutspeed ? 6 : 14) + stallComboBonus;
+		// Paralysis is a speed-control tool; near-worthless if we're
+		// already faster, and the full-paralysis chance is a bonus.
+		return (ctx.weOutspeed ? 6 : 16) + stallComboBonus;
 	}
 	case "slp": {
-		if (electricBlocks || mistyBlocks) return -10;
-		return 18 + stallComboBonus;
+		// Sleep is the strongest status in the game: the target loses
+		// 1-3 turns outright, which is strictly better than the chip or
+		// stat cut the others apply. It was priced at 20 — a rounding
+		// error above paralysis — so Spore lost to a middling attack
+		// every time. Worth the most against a healthy foe we can't
+		// simply KO; against something already at low HP the attack is
+		// the better click.
+		const bulk = defender.hpFraction ?? 1;
+		return SLEEP_BASE_VALUE * (0.45 + 0.55 * bulk) + stallComboBonus;
 	}
 	case "frz": return 6; // Rare.
 	}
 	return 4;
+}
+
+/**
+ * Guess whether a Pokemon attacks primarily off its physical side.
+ *
+ * Used to price Burn, whose Attack cut is dead weight against a special
+ * attacker. Prefers revealed moves (what it has actually clicked) and
+ * falls back to comparing its base Attack and Special Attack.
+ *
+ * @param mon The Pokemon to classify.
+ * @returns true when it looks physically oriented.
+ */
+function defenderLeansPhysical(mon: TrackedPokemon): boolean {
+	let physical = 0;
+	let special = 0;
+	for (const id of mon.revealedMoves) {
+		const category = Dex.moves.get(id).category;
+		if (category === "Physical") physical++;
+		else if (category === "Special") special++;
+	}
+	if (physical || special) return physical >= special;
+	const baseStats = Dex.species.get(mon.species).baseStats;
+	return !baseStats || baseStats.atk >= baseStats.spa;
 }
 
 /**

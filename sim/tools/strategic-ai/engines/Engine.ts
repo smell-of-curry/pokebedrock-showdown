@@ -78,6 +78,23 @@ export interface EngineContext {
 	 */
 	ladderAdvanceCap: number;
 	/**
+	 * How sharply the move ladder distinguishes a good option from a
+	 * mediocre one — the exponent applied to the closeness ratio in
+	 * {@link selectByScoreLadder}.
+	 *
+	 * 1 is honest: a candidate scoring half as much as the best is half
+	 * as likely to be reached. Below 1 the curve flattens, so a clearly
+	 * worse option feels nearly as good as the best one and gets picked
+	 * far more often. That is what being bad at Pokemon actually is —
+	 * misjudging *how much* better one line is — and unlike random
+	 * choice it stays bounded by the ladder's sign guard, so no amount
+	 * of flattening reaches a move that accomplishes nothing.
+	 *
+	 * This is the knob that carries most of the strength spread between
+	 * tiers 1-3, which otherwise share an engine. Defaults to 1.
+	 */
+	ladderRatioExponent: number;
+	/**
 	 * Extra matchup-score margin the best bench mon must clear over the
 	 * active mon before a voluntary (non-emergency) switch fires. Lower
 	 * = switch-happier. Scaled per difficulty by `DifficultyPolicy`.
@@ -144,16 +161,27 @@ export interface Engine {
  * @param startIndex Index to start the walk from.
  * @param advanceCap Maximum per-step advance probability in [0, 1].
  * @param prng PRNG used for the advance rolls.
+ * @param ratioExponent Exponent applied to the closeness ratio; below 1
+ * flattens the curve so clearly-worse options are reached more often.
+ * See {@link EngineContext.ladderRatioExponent}. Defaults to 1.
  * @returns The selected candidate. `sorted` must be non-empty.
  */
 export function selectByScoreLadder<T extends { score: number }>(
 	sorted: T[],
 	startIndex: number,
 	advanceCap: number,
-	prng: PRNG
+	prng: PRNG,
+	ratioExponent = 1
 ): T {
 	let idx = Math.max(0, Math.min(startIndex, sorted.length - 1));
 	if (advanceCap <= 0) return sorted[idx];
+	// Nothing good is available (every option is scored negative — an
+	// immune attack, a status move that can't land, a self-KO). There is
+	// no "plausible alternative" to slip to here, only degrees of bad,
+	// so take the least-bad option and skip the walk entirely. Without
+	// this, a heavily flattened ratio curve wanders down the negative
+	// run and surfaces as the AI clicking a move the target is immune to.
+	if (sorted[idx].score <= 0) return sorted[idx];
 	while (idx + 1 < sorted.length) {
 		const cur = sorted[idx].score;
 		const next = sorted[idx + 1].score;
@@ -162,7 +190,8 @@ export function selectByScoreLadder<T extends { score: number }>(
 		// negative same-sign runs because the list is sorted descending.
 		const ratio = cur === next ? 1 : cur > 0 ? next / cur : cur / next;
 		if (!(ratio > 0)) break;
-		if (prng.random() >= Math.min(advanceCap, ratio * advanceCap)) break;
+		const weight = ratioExponent === 1 ? ratio : ratio ** ratioExponent;
+		if (prng.random() >= Math.min(advanceCap, weight * advanceCap)) break;
 		idx++;
 	}
 	return sorted[idx];

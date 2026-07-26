@@ -501,10 +501,28 @@ function resolveMoveType(move: Move, input: DamageCalcInput): string {
 	return type;
 }
 
-function abilityImmunityBlocks(moveType: string, move: Move, input: DamageCalcInput): boolean {
-	const ability = toID(input.defender.ability);
-	if (move.category === "Status") return false;
-	switch (ability) {
+/**
+ * Whether the defender's ability blocks a damaging move outright.
+ *
+ * Split out from {@link abilityImmunityBlocks} so the cheaper engines
+ * (which work off raw request data rather than a `CalcPokemon`) share
+ * one table instead of keeping a second, always-staler copy. Wonder
+ * Guard is deliberately excluded: it depends on type effectiveness, so
+ * it belongs with the caller that has the full defender.
+ *
+ * @param ability The defender's ability (any casing; id-ified here).
+ * @param moveType The move's type after any -ate ability conversion.
+ * @param move The move, for its `wind` / `bullet` / `sound` flags.
+ * @param gravity Whether Gravity is active (which grounds Levitate).
+ * @returns true if the move deals no damage to this defender.
+ */
+export function abilityBlocksMoveType(
+	ability: string,
+	moveType: string,
+	move: { flags?: Move["flags"] },
+	gravity = false
+): boolean {
+	switch (toID(ability)) {
 	case "voltabsorb":
 	case "lightningrod":
 	case "motordrive":
@@ -514,14 +532,32 @@ function abilityImmunityBlocks(moveType: string, move: Move, input: DamageCalcIn
 	case "dryskin":
 		return moveType === "Water";
 	case "flashfire":
+	case "wellbakedbody":
 		return moveType === "Fire";
 	case "sapsipper":
 		return moveType === "Grass";
 	case "levitate":
-		return moveType === "Ground" && !input.field.gravity;
-	case "wonderguard":
-		return typeEffectivenessExp(moveType, input.defender) <= 0;
+		return moveType === "Ground" && !gravity;
+	case "eartheater":
+		return moveType === "Ground";
+	// Flag-based blocks: these ignore the move's type entirely, so a
+	// type-chart-only check can never catch them.
+	case "windrider":
+		return !!move.flags?.wind;
+	case "bulletproof":
+		return !!move.flags?.bullet;
+	case "soundproof":
+		return !!move.flags?.sound;
 	}
+	return false;
+}
+
+function abilityImmunityBlocks(moveType: string, move: Move, input: DamageCalcInput): boolean {
+	const ability = toID(input.defender.ability);
+	if (move.category === "Status") return false;
+	if (abilityBlocksMoveType(ability, moveType, move, input.field.gravity)) return true;
+	// Effectiveness-dependent, so it needs the full defender.
+	if (ability === "wonderguard") return typeEffectivenessExp(moveType, input.defender) <= 0;
 	return false;
 }
 

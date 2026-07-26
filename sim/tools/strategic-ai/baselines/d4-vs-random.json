@@ -1,0 +1,16 @@
+{
+	"format": "gen9randombattle",
+	"mirror": true,
+	"a": {
+		"difficulty": 4
+	},
+	"b": {
+		"difficulty": 3,
+		"engine": "random"
+	},
+	"games": 200,
+	"score": 0.915,
+	"elo": 412.80086734086245,
+	"scoreLow": 0.8780025335292736,
+	"created": "2026-07-26T02:41:18.954Z"
+}
