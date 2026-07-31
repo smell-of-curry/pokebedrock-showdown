@@ -47,27 +47,6 @@ export interface MatchupScore {
 	hazardFraction: number;
 }
 
-const COMMON_COVERAGE_TYPES = [
-	"Normal",
-	"Fire",
-	"Water",
-	"Electric",
-	"Grass",
-	"Ice",
-	"Fighting",
-	"Poison",
-	"Ground",
-	"Flying",
-	"Psychic",
-	"Bug",
-	"Rock",
-	"Ghost",
-	"Dragon",
-	"Dark",
-	"Steel",
-	"Fairy",
-];
-
 /**
  * Evaluate the matchup of our `mon` against the foe's active mon. We
  * assume both are at full health unless `mon.hpFraction` says otherwise.
@@ -535,21 +514,20 @@ function bestAttackingDamage(
 		const m = Dex.moves.get(id);
 		if (m && m.category !== "Status" && m.basePower > 0) moves.push(m);
 	}
-	const hasRevealedDamage = moves.length > 0;
 	// Whether to synthesise STAB / coverage proxies for unrevealed moves.
 	//
 	// For the *foe* (`useKnownOnly === true`) the revealed set is
 	// partial, so proxies are essential — they stop a foe that's only
 	// shown one of its two STABs from looking artificially safe.
 	//
-	// For *our* side (`useKnownOnly === false`) the revealed set is
-	// seeded from the battle request and is therefore the *complete*
-	// moveset. Imagining extra STAB/coverage moves on top would
-	// overestimate our own output and skew matchup/switching decisions,
-	// so we only fall back to proxies when (defensively) we somehow have
-	// no revealed damaging move to work from.
-	const addProxies = useKnownOnly || !hasRevealedDamage;
-	if (addProxies) {
+	// For *our* side (`useKnownOnly === false`) we never fabricate. The
+	// tracker seeds `revealedMoves` for our whole team (not just the
+	// active mon) straight from the battle request, so our movesets are
+	// already complete: an empty damaging set means the mon genuinely
+	// has none, not that we haven't seen it yet. Imagining moves for it
+	// would tell the switch evaluator that a pure support wall is an
+	// offensive threat and invite pivots into it.
+	if (useKnownOnly) {
 		// Skip types already covered by a revealed move to avoid
 		// double-counting (revealed Earthquake + imagined "Proxy
 		// Ground" → over-estimate). Emit BOTH categories per type and
@@ -573,20 +551,21 @@ function bestAttackingDamage(
 				accuracy: 100,
 			});
 		};
+		// STAB only. A Pokemon almost certainly has an attack of its own
+		// type, so assuming one is well-founded. Off-type coverage is
+		// not: since the best of the candidates is what gets used below,
+		// probing every type would amount to assuming the foe holds a
+		// perfect coverage move against whatever we bring in. Every
+		// switch-in then looks doomed, the matchup score for our whole
+		// bench collapses, and the engine pivots on phantom threats —
+		// the "dumb switches" players report. If unrevealed coverage is
+		// ever modelled here it needs a usage-weighted distribution, not
+		// a max over all 18 types.
 		for (const t of attackerMon.types) {
 			if (seenProxyTypes.has(t) || revealedTypes.has(t)) continue;
 			seenProxyTypes.add(t);
 			pushProxy("proxystab", t, "Physical");
 			pushProxy("proxystab", t, "Special");
-		}
-		if (!useKnownOnly) {
-			// Coverage moves: the most-feared off-type move. We probe a
-			// shortlist of common types; the best one wins.
-			for (const t of COMMON_COVERAGE_TYPES) {
-				if (seenProxyTypes.has(t) || revealedTypes.has(t)) continue;
-				pushProxy("proxycov", t, "Physical");
-				pushProxy("proxycov", t, "Special");
-			}
 		}
 	}
 	let best: { avgDamage: number, moveId: string } | null = null;

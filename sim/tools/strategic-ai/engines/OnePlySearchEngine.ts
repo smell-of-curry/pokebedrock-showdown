@@ -57,7 +57,7 @@ export class OnePlySearchEngine extends HeuristicEngine {
 			const move = Dex.moves.get(opt.id);
 			if (!move?.exists) return { opt, score: -Infinity };
 			const baseEval = evaluateMove(move, evalCtx);
-			const ourScore = computeOurOutcome(move, evalCtx);
+			const ourScore = computeOurOutcome(move, evalCtx, baseEval.score);
 			let weightedFoe = 0;
 			let totalWeight = 0;
 			for (let i = 0; i < foeMoveCandidates.length; i++) {
@@ -75,11 +75,11 @@ export class OnePlySearchEngine extends HeuristicEngine {
 			// don't go through the calc (status, hazards, pivot) still
 			// score correctly.
 			const search = ourScore.utility - weightedFoe;
-			let score = 0.4 * baseEval.score + search;
-			if (ctx.infoForgetting > 0 && evalCtx.defender.revealedMoves.size > 0 &&
-				ctx.prng.random() < ctx.infoForgetting) {
-				score *= 0.85;
-			}
+			// No score-scaling for forgetting: `evalCtx.defender` is
+			// already the hazy view resolved once per decision, and
+			// scaling a negative score promotes useless moves. See
+			// `InfoForgetting`.
+			const score = 0.4 * baseEval.score + search;
 			return { opt, score };
 		});
 	}
@@ -97,13 +97,27 @@ function topMoveWeights(inference: NonNullable<ReturnType<typeof inferFoeActive>
  * Compute our move's outcome (damage we deal, KO probability, utility
  * contribution). Returns the components so the foe's reply can read
  * `ourKills` to know if we KOed first.
+ *
+ * @param move The move being evaluated.
+ * @param ctx The evaluation context.
+ * @param heuristicScore The heuristic engine's score for `move`, used
+ * as the search-layer utility for non-damaging moves.
+ * @returns The move's search utility plus the KO probability and damage
+ * fraction the foe-reply term needs.
  */
 function computeOurOutcome(
 	move: Move,
-	ctx: MoveEvalContext
+	ctx: MoveEvalContext,
+	heuristicScore: number
 ): { utility: number, koProb: number, ourDamageFraction: number } {
 	if (move.category === "Status") {
-		return { utility: 0, koProb: 0, ourDamageFraction: 0 };
+		// A status move deals no damage, but "no damage" is not "no
+		// value" — setup, hazards, recovery, and status infliction are
+		// exactly how a good player converts a neutral matchup. Scoring
+		// them 0 here while attacks receive their full damage utility
+		// meant the search layer systematically buried every support
+		// move, and the AI only ever attacked.
+		return { utility: heuristicScore, koProb: 0, ourDamageFraction: 0 };
 	}
 	const calc = calculateDamage({
 		attacker: fromTracked(ctx.attacker),

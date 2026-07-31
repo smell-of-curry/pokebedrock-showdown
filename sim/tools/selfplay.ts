@@ -23,6 +23,7 @@
  * @license MIT
  */
 
+import * as fs from "fs";
 import * as os from "os";
 import { Worker, isMainThread, parentPort, workerData } from "worker_threads";
 
@@ -30,7 +31,23 @@ import { type ObjectReadWriteStream } from "../../lib/streams";
 import * as BattleStreams from "../battle-stream";
 import { PRNG, type PRNGSeed } from "../prng";
 import type { ChoiceRequest } from "../side";
+import { Teams } from "../teams";
+import {
+	DEFAULT_SPRT,
+	Sprt,
+	scoreInterval,
+	type ScoreInterval,
+	type SprtConfig,
+	type SprtVerdict,
+} from "./ai-stats";
 import { PlayerAI, type PlayerAIOptions } from "./player-ai";
+import { ENGINE_NAMES, type EngineName } from "./strategic-ai/policy/DifficultyPolicy";
+import {
+	DecisionStats,
+	decisionRates,
+	emptyCounters,
+	type DecisionCounters,
+} from "./strategic-ai/telemetry/DecisionStats";
 
 /** One contender's configuration. */
 export interface ContenderConfig {
@@ -40,6 +57,18 @@ export interface ContenderConfig {
 	difficulty: number;
 	/** Optional search budget override (ms) for OnePly/MCTS tiers. */
 	searchBudgetMs?: number;
+	/**
+	 * Force a specific engine instead of the one the difficulty ladder
+	 * would pick.
+	 *
+	 * The point of this is an *absolute* yardstick. A tier-vs-tier score
+	 * only says whether d4 still beats d3; it says nothing about whether
+	 * either got stronger, so retuning both at once can look like "no
+	 * change" while the whole ladder sinks. Pinning one side to
+	 * `random` — which has no knobs and so cannot drift — gives a fixed
+	 * reference every tier can be scored against across revisions.
+	 */
+	engine?: EngineName;
 }
 
 /** Options for {@link runSelfPlay}. */
@@ -69,6 +98,22 @@ export interface SelfPlayOptions {
 	jobs?: number;
 	/** Log each game's result line to stdout. */
 	verbose?: boolean;
+	/**
+	 * Play games in mirrored pairs: the same two generated teams are
+	 * played twice with the contenders swapped between them. Both
+	 * contenders therefore pilot both teams, which removes team-quality
+	 * luck — by far the largest variance source in random-battle
+	 * formats — from the comparison.
+	 */
+	mirror?: boolean;
+	/**
+	 * Run the series as a sequential test and stop as soon as the
+	 * evidence clears a bound. `games` becomes the maximum, not the
+	 * target.
+	 */
+	sprt?: SprtConfig;
+	/** Collect per-decision telemetry (costs a damage calc per move). */
+	telemetry?: boolean;
 }
 
 /** Aggregated results returned by {@link runSelfPlay}. */
@@ -81,6 +126,16 @@ export interface SelfPlayResult {
 	winrateA: number;
 	avgTurns: number;
 	errors: number;
+	/**
+	 * A's score and Elo with a 95% confidence interval, counting ties
+	 * as half a point. This — not {@link winrateA} — is the number to
+	 * quote: it says how big the measured edge is *and* how sure we are.
+	 */
+	interval: ScoreInterval;
+	/** SPRT verdict, when `options.sprt` was set. */
+	sprt?: { verdict: SprtVerdict, llr: number, config: SprtConfig };
+	/** Per-decision counters per contender, when `options.telemetry` was set. */
+	telemetry?: { a: DecisionCounters, b: DecisionCounters };
 }
 
 /**
@@ -122,6 +177,8 @@ interface GameResult {
 	errored: boolean;
 	/** First stream error message, when `errored` is set. */
 	errorMessage?: string;
+	/** Per-contender decision counters, when telemetry was enabled. */
+	counters?: { a: DecisionCounters, b: DecisionCounters };
 }
 
 /** Everything a worker needs to play one game. Structured-cloneable. */
@@ -135,6 +192,14 @@ interface WorkerTask {
 	gameSeed: PRNGSeed;
 	maxTurns: number;
 	gameTimeoutMs: number;
+	/**
+	 * Packed teams for p1/p2. Always set by {@link runSelfPlay}: leaving
+	 * the team out makes the simulator generate one from a fresh crypto
+	 * seed, which silently defeats `--seed` reproducibility. Generating
+	 * teams up front also lets mirrored pairs reuse the same two teams.
+	 */
+	teams: { p1: string, p2: string };
+	telemetry: boolean;
 }
 
 /**
@@ -147,6 +212,8 @@ interface WorkerTask {
  * @param prng Run-level PRNG used to derive per-game seeds.
  * @param maxTurns Turn cap before forcing a tie.
  * @param gameTimeoutMs Wall-clock cap before the game is force-tied.
+ * @param teams Packed teams for p1 and p2.
+ * @param telemetry Whether to collect per-decision counters.
  * @returns The winner (by contender), turn count, and error flag.
  */
 async function playGame(
@@ -156,7 +223,9 @@ async function playGame(
 	b: ContenderConfig,
 	prng: PRNG,
 	maxTurns: number,
-	gameTimeoutMs: number
+	gameTimeoutMs: number,
+	teams: { p1: string, p2: string },
+	telemetry: boolean
 ): Promise<GameResult> {
 	const battleStream = new BattleStreams.BattleStream();
 	const streams = BattleStreams.getPlayerStreams(battleStream);
@@ -172,17 +241,22 @@ async function playGame(
 		prng.random(2 ** 16), prng.random(2 ** 16),
 	].join(",") as PRNGSeed;
 
+	const statsA = telemetry ? new DecisionStats() : undefined;
+	const statsB = telemetry ? new DecisionStats() : undefined;
 	const makeAI = (
 		stream: ObjectReadWriteStream<string>,
-		config: ContenderConfig
+		config: ContenderConfig,
+		stats: DecisionStats | undefined
 	) => new SelfPlayAI(stream, {
 		difficulty: config.difficulty,
 		searchBudgetMs: config.searchBudgetMs,
+		engine: config.engine,
 		seed: newSeed(),
+		stats,
 	} satisfies PlayerAIOptions);
 
-	const p1 = makeAI(streams.p1, aIsP1 ? a : b);
-	const p2 = makeAI(streams.p2, aIsP1 ? b : a);
+	const p1 = makeAI(streams.p1, aIsP1 ? a : b, aIsP1 ? statsA : statsB);
+	const p2 = makeAI(streams.p2, aIsP1 ? b : a, aIsP1 ? statsB : statsA);
 	// A crashed AI loop is the only signal that a game is unwinnable; surface
 	// it immediately instead of waiting for the force-tie/hang timers. A
 	// *successful* `start()` resolves at battle end (possibly before `consume`
@@ -199,8 +273,8 @@ async function playGame(
 	const p2Name = aIsP1 ? "Contender B" : "Contender A";
 	void streams.omniscient.write(
 		`>start ${JSON.stringify({ formatid: format, seed: newSeed() })}\n` +
-		`>player p1 ${JSON.stringify({ name: p1Name })}\n` +
-		`>player p2 ${JSON.stringify({ name: p2Name })}`
+		`>player p1 ${JSON.stringify({ name: p1Name, team: teams.p1 })}\n` +
+		`>player p2 ${JSON.stringify({ name: p2Name, team: teams.p2 })}`
 	);
 
 	let turns = 0;
@@ -260,9 +334,12 @@ async function playGame(
 		void streams.omniscient.writeEnd();
 	} catch {}
 
-	if (!winnerName) return { winner: null, turns, errored, errorMessage };
+	const counters = statsA && statsB ?
+		{ a: statsA.snapshot(), b: statsB.snapshot() } :
+		undefined;
+	if (!winnerName) return { winner: null, turns, errored, errorMessage, counters };
 	const winner = winnerName === "Contender A" ? "a" : winnerName === "Contender B" ? "b" : null;
-	return { winner, turns, errored, errorMessage };
+	return { winner, turns, errored, errorMessage, counters };
 }
 
 /**
@@ -276,13 +353,13 @@ async function playGame(
  */
 async function playGameWithRetries(task: WorkerTask): Promise<GameResult> {
 	const prng = PRNG.get(task.gameSeed);
-	let result = await playGame(
-		task.format, task.aIsP1, task.a, task.b, prng, task.maxTurns, task.gameTimeoutMs
+	const play = () => playGame(
+		task.format, task.aIsP1, task.a, task.b, prng,
+		task.maxTurns, task.gameTimeoutMs, task.teams, task.telemetry
 	);
+	let result = await play();
 	for (let attempt = 0; result.errored && result.turns === 0 && attempt < 3; attempt++) {
-		result = await playGame(
-			task.format, task.aIsP1, task.a, task.b, prng, task.maxTurns, task.gameTimeoutMs
-		);
+		result = await play();
 	}
 	return result;
 }
@@ -295,11 +372,14 @@ async function playGameWithRetries(task: WorkerTask): Promise<GameResult> {
  * @param tasks The games to play.
  * @param jobs Pool size (number of concurrent worker threads).
  * @param onResult Called once per task as results arrive (any order).
+ * @param shouldStop Polled before each task is claimed; returning true
+ * drains the pool without starting further games (SPRT early stop).
  */
 async function runWithWorkerPool(
 	tasks: WorkerTask[],
 	jobs: number,
-	onResult: (index: number, result: GameResult) => void
+	onResult: (index: number, result: GameResult) => void,
+	shouldStop: () => boolean = () => false
 ): Promise<void> {
 	let next = 0;
 	const spawn = () => new Worker(__filename, { workerData: { selfPlayWorker: true } });
@@ -332,7 +412,7 @@ async function runWithWorkerPool(
 
 	const lane = async () => {
 		let worker = spawn();
-		while (next < tasks.length) {
+		while (next < tasks.length && !shouldStop()) {
 			const task = tasks[next++];
 			try {
 				onResult(task.index, await runOne(worker, task));
@@ -360,29 +440,47 @@ async function runWithWorkerPool(
  * @returns Aggregate winrates and stats for the series.
  */
 export async function runSelfPlay(options: SelfPlayOptions): Promise<SelfPlayResult> {
-	const games = options.games ?? 50;
+	const maxGames = options.games ?? 50;
 	const format = options.format ?? "gen9randombattle";
 	const maxTurns = options.maxTurns ?? 500;
 	const gameTimeoutMs = options.gameTimeoutMs ?? 60_000;
 	const jobs = Math.max(1, options.jobs ?? defaultJobs());
+	const telemetry = !!options.telemetry;
+	const mirror = !!options.mirror;
 	const prng = PRNG.get(options.seed ?? null);
+	const newSeed = (): PRNGSeed => [
+		prng.random(2 ** 16), prng.random(2 ** 16),
+		prng.random(2 ** 16), prng.random(2 ** 16),
+	].join(",") as PRNGSeed;
 
-	// Pre-derive every game's seed from the run PRNG so results are
-	// reproducible regardless of pool size or completion order.
+	// Mirrored series play each team pair twice, so the game count has to
+	// be even for every pair to complete.
+	const games = mirror ? Math.max(2, maxGames - (maxGames % 2)) : maxGames;
+
+	// Pre-derive every game's seed AND team from the run PRNG so results
+	// are reproducible regardless of pool size or completion order. The
+	// teams matter most: omitting them makes the simulator generate from
+	// a fresh crypto seed, which silently voids `--seed`.
 	const tasks: WorkerTask[] = [];
 	for (let i = 0; i < games; i++) {
+		const isSecondLeg = mirror && i % 2 === 1;
+		const teams = isSecondLeg ?
+			// Second leg of a mirrored pair: same two teams, swapped
+			// contenders. `aIsP1` flips below, so A now pilots the team
+			// B just played and vice versa.
+			tasks[i - 1].teams :
+			{ p1: generateTeam(format, newSeed()), p2: generateTeam(format, newSeed()) };
 		tasks.push({
 			index: i,
 			format,
 			aIsP1: i % 2 === 0,
 			a: options.a,
 			b: options.b,
-			gameSeed: [
-				prng.random(2 ** 16), prng.random(2 ** 16),
-				prng.random(2 ** 16), prng.random(2 ** 16),
-			].join(",") as PRNGSeed,
+			gameSeed: newSeed(),
 			maxTurns,
 			gameTimeoutMs,
+			teams,
+			telemetry,
 		});
 	}
 
@@ -392,6 +490,44 @@ export async function runSelfPlay(options: SelfPlayOptions): Promise<SelfPlayRes
 	let errors = 0;
 	let totalTurns = 0;
 	let completed = 0;
+	const counters = { a: emptyCounters(), b: emptyCounters() };
+	const sprt = options.sprt ? new Sprt(options.sprt) : null;
+	// SPRT observations are fed in task order, not completion order, so
+	// the stopping point is identical at any `--jobs`. Out-of-order
+	// results wait in `pending` until the contiguous prefix reaches them.
+	const pending = new Map<number, GameResult>();
+	let nextToScore = 0;
+	const scores: number[] = [];
+	let stopped = false;
+
+	const scoreOf = (result: GameResult) =>
+		result.winner === "a" ? 1 : result.winner === "b" ? 0 : 0.5;
+
+	const drain = () => {
+		while (pending.has(nextToScore)) {
+			const first = pending.get(nextToScore)!;
+			pending.delete(nextToScore);
+			// In mirrored mode a pair is one observation (average of both
+			// legs), which is what removes the team-luck variance.
+			if (!mirror) {
+				scores.push(scoreOf(first));
+				nextToScore++;
+			} else if (pending.has(nextToScore + 1)) {
+				const second = pending.get(nextToScore + 1)!;
+				pending.delete(nextToScore + 1);
+				scores.push((scoreOf(first) + scoreOf(second)) / 2);
+				nextToScore += 2;
+			} else {
+				// Wait for the pair's second leg.
+				pending.set(nextToScore, first);
+				return;
+			}
+			if (sprt) {
+				sprt.observe(scores[scores.length - 1]);
+				if (sprt.verdict() !== "continue") stopped = true;
+			}
+		}
+	};
 
 	const record = (index: number, result: GameResult) => {
 		completed++;
@@ -400,30 +536,81 @@ export async function runSelfPlay(options: SelfPlayOptions): Promise<SelfPlayRes
 		if (result.winner === "a") winsA++;
 		else if (result.winner === "b") winsB++;
 		else ties++;
+		if (result.counters) {
+			// Contender labels are already normalised inside playGame, so
+			// these fold together regardless of which side each played.
+			counters.a = mergeCounters(counters.a, result.counters.a);
+			counters.b = mergeCounters(counters.b, result.counters.b);
+		}
+		pending.set(index, result);
+		drain();
 		if (options.verbose) {
 			const tag = result.winner === "a" ? nameOf(options.a, "A") :
 				result.winner === "b" ? nameOf(options.b, "B") : "tie";
+			const llr = sprt ? `  LLR ${sprt.llr().toFixed(2)}` : "";
 			console.log(`[${completed}/${games}] game ${index + 1}: ${tag} in ${result.turns} turns` +
-				`${result.errored ? ` (errored: ${result.errorMessage})` : ""}`);
+				`${result.errored ? ` (errored: ${result.errorMessage})` : ""}${llr}`);
 		}
 	};
 
 	if (jobs === 1) {
-		for (const task of tasks) record(task.index, await playGameWithRetries(task));
+		for (const task of tasks) {
+			if (stopped) break;
+			record(task.index, await playGameWithRetries(task));
+		}
 	} else {
-		await runWithWorkerPool(tasks, jobs, record);
+		await runWithWorkerPool(tasks, jobs, record, () => stopped);
 	}
 
 	const decisive = winsA + winsB;
+	const played = winsA + winsB + ties;
 	return {
-		games,
+		games: played,
 		winsA,
 		winsB,
 		ties,
 		winrateA: decisive > 0 ? winsA / decisive : 0.5,
-		avgTurns: games > 0 ? totalTurns / games : 0,
+		avgTurns: played > 0 ? totalTurns / played : 0,
 		errors,
+		interval: scoreInterval(scores),
+		...(sprt ? { sprt: { verdict: sprt.verdict(), llr: sprt.llr(), config: sprt.config } } : {}),
+		...(telemetry ? { telemetry: counters } : {}),
 	};
+}
+
+/**
+ * Generate and pack one team for a format.
+ *
+ * @param format Format id (must have a random team generator).
+ * @param seed Seed for the generator, so the team is reproducible.
+ * @returns The packed team string.
+ * @throws if the format has no team generator, since a strength series
+ * without fixed teams can be neither seeded nor mirrored.
+ */
+function generateTeam(format: string, seed: PRNGSeed): string {
+	try {
+		return Teams.pack(Teams.generate(format, { seed }));
+	} catch (err) {
+		throw new Error(
+			`Cannot generate a team for format "${format}": ${(err as Error).message}. ` +
+			`The self-play harness needs a format with a random team generator ` +
+			`(e.g. gen9randombattle, gen9randomdoublesbattle).`
+		);
+	}
+}
+
+/**
+ * Add two counter sets.
+ *
+ * @param into The accumulated counters.
+ * @param from The counters to add.
+ * @returns A new summed counter set.
+ */
+function mergeCounters(into: DecisionCounters, from: DecisionCounters): DecisionCounters {
+	const stats = new DecisionStats();
+	stats.merge(into);
+	stats.merge(from);
+	return stats.snapshot();
 }
 
 /**
@@ -501,10 +688,22 @@ if (require.main === module && isMainThread) {
 			`  --seed <n,n,n,n>  Run seed for reproducibility\n` +
 			`  --budget-a <ms>   Search budget override for A\n` +
 			`  --budget-b <ms>   Search budget override for B\n` +
+			`  --engine-a <id>   Force A's engine (${ENGINE_NAMES.join("|")})\n` +
+			`  --engine-b <id>   Force B's engine (fixed yardstick: random)\n` +
 			`  --max-turns <n>   Turn cap per game (default 500)\n` +
 			`  --game-timeout <ms>  Wall-clock cap per game before force-tie (default 60000)\n` +
 			`  --jobs <n>        Worker threads (default: cores - 1; 1 = inline)\n` +
-			`  --quiet           Suppress per-game lines`
+			`  --quiet           Suppress per-game lines\n` +
+			`  --mirror          Play mirrored pairs (same teams, swapped sides)\n` +
+			`  --sprt            Stop early once the result is significant\n` +
+			`  --elo0 <n>        SPRT null hypothesis in Elo (default 0)\n` +
+			`  --elo1 <n>        SPRT alternative hypothesis in Elo (default 10)\n` +
+			`  --alpha <p>       SPRT type-I error rate (default 0.05)\n` +
+			`  --beta <p>        SPRT type-II error rate (default 0.05)\n` +
+			`  --telemetry       Count immune/status/switch/rejection decisions\n` +
+			`  --out <path>      Write the result as JSON\n` +
+			`  --baseline <path> Compare against a saved run and exit 1 on regression\n` +
+			`  --write-baseline <path>  Save this run as the baseline`
 		);
 		process.exit(0);
 	}
@@ -526,33 +725,181 @@ if (require.main === module && isMainThread) {
 		}
 		return n;
 	};
+	const floatArg = (raw: string | undefined, name: string): number | undefined => {
+		if (raw === undefined) return undefined;
+		const n = Number(raw);
+		if (!Number.isFinite(n)) {
+			console.error(`Invalid --${name}: "${raw}" (expected a number)`);
+			process.exit(1);
+		}
+		return n;
+	};
+	const engineArg = (raw: string | undefined, name: string): EngineName | undefined => {
+		if (raw === undefined) return undefined;
+		if (!(ENGINE_NAMES as readonly string[]).includes(raw)) {
+			console.error(`Invalid --${name}: "${raw}" (expected ${ENGINE_NAMES.join("|")})`);
+			process.exit(1);
+		}
+		return raw as EngineName;
+	};
+	const format = args.format ?? "gen9randombattle";
 	const options: SelfPlayOptions = {
 		a: {
 			difficulty: intArg(args.a, "a", 0, 5) ?? 3,
 			searchBudgetMs: intArg(args["budget-a"], "budget-a", 0),
+			engine: engineArg(args["engine-a"], "engine-a"),
 		},
 		b: {
 			difficulty: intArg(args.b, "b", 0, 5) ?? 1,
 			searchBudgetMs: intArg(args["budget-b"], "budget-b", 0),
+			engine: engineArg(args["engine-b"], "engine-b"),
 		},
 		games: intArg(args.games, "games", 1),
-		format: args.format,
+		format,
 		seed: (args.seed as PRNGSeed | undefined) ?? null,
 		maxTurns: intArg(args["max-turns"], "max-turns", 1),
 		gameTimeoutMs: intArg(args["game-timeout"], "game-timeout", 0),
 		jobs: intArg(args.jobs, "jobs", 1),
 		verbose: !args.quiet,
+		mirror: !!args.mirror,
+		telemetry: !!args.telemetry,
+		sprt: args.sprt ? {
+			elo0: floatArg(args.elo0, "elo0") ?? DEFAULT_SPRT.elo0,
+			elo1: floatArg(args.elo1, "elo1") ?? DEFAULT_SPRT.elo1,
+			alpha: floatArg(args.alpha, "alpha") ?? DEFAULT_SPRT.alpha,
+			beta: floatArg(args.beta, "beta") ?? DEFAULT_SPRT.beta,
+		} : undefined,
 	};
 	void runSelfPlay(options).then(result => {
 		const aLabel = nameOf(options.a, "A");
 		const bLabel = nameOf(options.b, "B");
-		console.log(`\n=== Self-play: ${aLabel} vs ${bLabel} (${options.format ?? "gen9randombattle"}) ===`);
+		console.log(`\n=== Self-play: ${aLabel} vs ${bLabel} (${format}${options.mirror ? ", mirrored" : ""}) ===`);
 		console.log(`games:    ${result.games}`);
 		console.log(`${aLabel} wins: ${result.winsA}`);
 		console.log(`${bLabel} wins: ${result.winsB}`);
 		console.log(`ties:     ${result.ties}${result.errors ? `  (errors: ${result.errors})` : ""}`);
 		console.log(`winrate ${aLabel}: ${(result.winrateA * 100).toFixed(1)}% of decisive games`);
+		const iv = result.interval;
+		console.log(`score ${aLabel}:   ${(iv.score * 100).toFixed(1)}%  ` +
+			`[${(iv.scoreLow * 100).toFixed(1)}%, ${(iv.scoreHigh * 100).toFixed(1)}%] 95% CI`);
+		console.log(`elo ${aLabel}:     ${iv.elo >= 0 ? "+" : ""}${iv.elo.toFixed(0)}  ` +
+			`[${iv.eloLow.toFixed(0)}, ${iv.eloHigh.toFixed(0)}]`);
 		console.log(`avg turns: ${result.avgTurns.toFixed(1)}`);
-		process.exit(0);
+		if (result.sprt) {
+			const { verdict, llr, config } = result.sprt;
+			console.log(`sprt:      ${verdict} (LLR ${llr.toFixed(2)}, ` +
+				`H0 ${config.elo0} Elo vs H1 ${config.elo1} Elo)`);
+		}
+		if (result.telemetry) {
+			printTelemetry(aLabel, result.telemetry.a);
+			printTelemetry(bLabel, result.telemetry.b);
+		}
+		if (args.out) {
+			fs.writeFileSync(args.out, `${JSON.stringify({
+				format, mirror: !!options.mirror, seed: options.seed,
+				a: options.a, b: options.b, ...result,
+			}, null, "\t")}\n`);
+			console.log(`wrote ${args.out}`);
+		}
+		if (args["write-baseline"]) {
+			writeBaseline(args["write-baseline"], format, options, result);
+			console.log(`wrote baseline ${args["write-baseline"]}`);
+		}
+		process.exit(args.baseline ? checkBaseline(args.baseline, result) : 0);
 	});
+}
+
+/**
+ * Print one contender's decision telemetry.
+ *
+ * @param label The contender's display name.
+ * @param counters That contender's counters.
+ */
+function printTelemetry(label: string, counters: DecisionCounters): void {
+	const r = decisionRates(counters);
+	const pct = (v: number) => `${(v * 100).toFixed(1)}%`;
+	console.log(`telemetry ${label}: ${counters.decisions} decisions, ${counters.moves} moves`);
+	console.log(`  immune clicks   ${counters.immuneMoves} (${pct(r.immuneMoveRate)})` +
+		`  of which avoidable: ${counters.avoidableImmuneMoves} (${pct(r.avoidableImmuneMoveRate)})`);
+	console.log(`  zero-damage     ${counters.zeroDamageMoves} (${pct(r.zeroDamageMoveRate)})`);
+	console.log(`  resisted        ${counters.resistedMoves} (${pct(r.resistedMoveRate)})`);
+	console.log(`  status moves    ${counters.statusMoves} (${pct(r.statusMoveRate)})`);
+	console.log(`  switches        ${counters.switches} (${pct(r.switchRate)})`);
+	console.log(`  rejections      ${counters.rejections} (${pct(r.rejectionRate)})`);
+}
+
+/** A saved run, used as the regression reference for `--baseline`. */
+interface Baseline {
+	format: string;
+	mirror: boolean;
+	a: ContenderConfig;
+	b: ContenderConfig;
+	games: number;
+	/** A's mean score in the baseline run. */
+	score: number;
+	/** A's Elo in the baseline run. */
+	elo: number;
+	/** Lower 95% bound on A's score, i.e. the floor a rerun must clear. */
+	scoreLow: number;
+	created: string;
+}
+
+/**
+ * Save a run as a reusable baseline.
+ *
+ * @param path Where to write the baseline JSON.
+ * @param format The format the series ran.
+ * @param options The series options.
+ * @param result The series result.
+ */
+function writeBaseline(
+	path: string,
+	format: string,
+	options: SelfPlayOptions,
+	result: SelfPlayResult
+): void {
+	const baseline: Baseline = {
+		format,
+		mirror: !!options.mirror,
+		a: options.a,
+		b: options.b,
+		games: result.games,
+		score: result.interval.score,
+		elo: result.interval.elo,
+		scoreLow: result.interval.scoreLow,
+		created: new Date().toISOString(),
+	};
+	fs.writeFileSync(path, `${JSON.stringify(baseline, null, "\t")}\n`);
+}
+
+/**
+ * Compare a run against a saved baseline.
+ *
+ * A regression is only reported when the two intervals don't overlap —
+ * i.e. the new run's *upper* bound sits below the baseline's *lower*
+ * bound. Anything less than that is noise, and failing CI on noise
+ * trains people to ignore the gate.
+ *
+ * @param path Path to the baseline JSON.
+ * @param result The current series result.
+ * @returns The process exit code: 1 on a real regression, else 0.
+ */
+function checkBaseline(path: string, result: SelfPlayResult): number {
+	let baseline: Baseline;
+	try {
+		baseline = JSON.parse(fs.readFileSync(path, "utf8"));
+	} catch (err) {
+		console.error(`\nCannot read baseline ${path}: ${(err as Error).message}`);
+		return 1;
+	}
+	const iv = result.interval;
+	console.log(`\nbaseline:  score ${(baseline.score * 100).toFixed(1)}% ` +
+		`(${baseline.elo >= 0 ? "+" : ""}${baseline.elo.toFixed(0)} Elo, ${baseline.games} games, ${baseline.created})`);
+	if (iv.scoreHigh < baseline.scoreLow) {
+		console.error(`REGRESSION: this run's 95% upper bound (${(iv.scoreHigh * 100).toFixed(1)}%) ` +
+			`is below the baseline's lower bound (${(baseline.scoreLow * 100).toFixed(1)}%).`);
+		return 1;
+	}
+	console.log(`no regression detected (intervals overlap).`);
+	return 0;
 }

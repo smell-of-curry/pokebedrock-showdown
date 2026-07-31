@@ -26,6 +26,7 @@ import {
 } from "./strategic-ai/policy/DifficultyPolicy";
 import { BattleStateTracker } from "./strategic-ai/state/BattleStateTracker";
 import { parseLine, type SideId } from "./strategic-ai/state/LogParser";
+import type { DecisionStats } from "./strategic-ai/telemetry/DecisionStats";
 
 /**
  * Construction options for {@link PlayerAI}.
@@ -58,6 +59,13 @@ export interface PlayerAIOptions {
 	 * pipe it through the standard `BattlePlayer` plumbing.
 	 */
 	engineInstance?: Engine;
+	/**
+	 * Opt-in decision telemetry (immune-move clicks, status-move usage,
+	 * switch rate, rejections). Costs one damage calculation per chosen
+	 * move, so production hosts leave it unset; the self-play harness
+	 * passes one per game.
+	 */
+	stats?: DecisionStats;
 }
 
 /**
@@ -78,6 +86,7 @@ export class PlayerAI extends BattlePlayer {
 	protected readonly engine: Engine;
 	protected readonly engineCtx: EngineContext;
 	protected tracker: BattleStateTracker | null = null;
+	protected readonly stats: DecisionStats | null;
 	private readonly pendingLogLines: string[] = [];
 
 	constructor(
@@ -88,6 +97,7 @@ export class PlayerAI extends BattlePlayer {
 		super(playerStream, debug);
 		this.prng = PRNG.get(options.seed ?? null);
 		this.difficulty = normaliseDifficulty(options.difficulty);
+		this.stats = options.stats ?? null;
 		this.engine = options.engineInstance ??
 			pickEngine(this.difficulty, options.engine ?? "auto");
 		this.engineCtx = {
@@ -101,6 +111,7 @@ export class PlayerAI extends BattlePlayer {
 			lastMoveFailedByMon: new Set(),
 			switchCount: 0,
 			ladderAdvanceCap: 0.5,
+			ladderRatioExponent: 1,
 			switchMargin: 10,
 			infoForgetting: 0,
 			searchBudgetMs: options.searchBudgetMs,
@@ -253,6 +264,7 @@ export class PlayerAI extends BattlePlayer {
 	 *   disabled for that mon and clear `lastMoveByMon` so we don't retry it.
 	 */
 	override receiveError(error: Error): void {
+		this.stats?.recordRejection();
 		const m1 = /^\[([^\]]+)\] ([^:]+): (.+)$/s.exec(error.message);
 		if (!m1) return;
 		const suffix = m1[1];
@@ -353,6 +365,8 @@ export class PlayerAI extends BattlePlayer {
 				}
 			}
 		}
-		return this.engine.choose(request, this.engineCtx);
+		const choice = this.engine.choose(request, this.engineCtx);
+		this.stats?.record(request, choice, this.tracker);
+		return choice;
 	}
 }

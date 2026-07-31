@@ -170,6 +170,15 @@ export const Teams = new class Teams {
 			const id = this.packName(set.species || set.name);
 			buf += `|${this.packName(set.name || set.species) === id ? '' : id}`;
 
+			// uuid - @pokebedrock
+			buf += `|${set.uuid || ''}`;
+
+			// currentHealth - @pokebedrock
+			buf += `|${set.currentHealth ?? ''}`;
+
+			// status - @pokebedrock
+			buf += `|${set.status || ''}`;
+
 			// item
 			buf += `|${this.packName(set.item)}`;
 
@@ -178,6 +187,11 @@ export const Teams = new class Teams {
 
 			// moves
 			buf += '|' + set.moves.map(this.packName).join(',');
+
+			// movesInfo - @pokebedrock
+			buf += '|' + (set.movesInfo ?
+				set.movesInfo.map(info => `${info?.pp ?? ''}/${info?.maxPp ?? ''}`).join(',') :
+				'');
 
 			// nature
 			buf += `|${set.nature || ''}`;
@@ -288,7 +302,12 @@ export const Teams = new class Teams {
 			// currentHealth - @pokebedrock
 			j = buf.indexOf('|', i);
 			if (j < 0) return null;
-			set.currentHealth = parseInt(buf.substring(i, j));
+			// Absent on every set that isn't mid-battle (all vanilla ones),
+			// where `parseInt('')` is NaN. Leaving that in place round-trips
+			// the literal string "NaN" back out through `pack` and puts a
+			// NaN one `??` away from being read as real HP.
+			const currentHealth = parseInt(buf.substring(i, j));
+			if (Number.isFinite(currentHealth)) set.currentHealth = currentHealth;
 			i = j + 1;
 
 			// status - @pokebedrock
@@ -322,16 +341,22 @@ export const Teams = new class Teams {
 			// movesInfo - @pokebedrock
 			j = buf.indexOf('|', i);
 			if (j < 0) return null;
-			set.movesInfo = buf
-				.substring(i, j)
-				.split(',', 24)
-				.map(moveData => {
-					const moveInfo: AdditionalMoveInfo = {} as AdditionalMoveInfo;
-					const data = moveData.split('/');
-					moveInfo.pp = parseInt(data[0]);
-					moveInfo.maxPp = parseInt(data[1]);
-					return moveInfo;
-				});
+			if (j !== i) {
+				const movesInfo = buf
+					.substring(i, j)
+					.split(',', 24)
+					.map(moveData => {
+						const [pp, maxPp] = moveData.split('/').map(n => parseInt(n));
+						return { pp, maxPp } satisfies AdditionalMoveInfo;
+					});
+				// A partially-parsed entry is worse than none: `Pokemon`
+				// reads these with `?? basepp`, which does not catch NaN,
+				// so a single unparseable slot would leave that move on 0
+				// PP and the mon unable to act at all.
+				if (movesInfo.every(info => Number.isFinite(info.pp) && Number.isFinite(info.maxPp))) {
+					set.movesInfo = movesInfo;
+				}
+			}
 			i = j + 1;
 
 			// nature

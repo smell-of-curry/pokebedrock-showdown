@@ -34,6 +34,7 @@ import { evaluateMove, type MoveEvalContext } from "../mechanics/MoveEvaluator";
 import { chooseBestSwitch, evaluateMatchup, scaledSpeed } from "../mechanics/SwitchEvaluator";
 import { pickTarget } from "../mechanics/TargetPicker";
 import { chooseTransform } from "../mechanics/TransformPolicy";
+import { hazyView } from "../policy/InfoForgetting";
 import type { BattleStateTracker, TrackedPokemon } from "../state/BattleStateTracker";
 import { selectByScoreLadder, type Engine, type EngineContext } from "./Engine";
 
@@ -305,8 +306,12 @@ export class HeuristicEngine implements Engine {
 		const side = request.side;
 		const sideMon = side.pokemon[slotIndex];
 		const myMon = this.resolveTrackedFromRequest(sideMon, ctx, tracker.mySide);
-		const foeMon = tracker.foeActive;
-		if (!myMon || !foeMon) return "default";
+		const trackedFoe = tracker.foeActive;
+		if (!myMon || !trackedFoe) return "default";
+		// Weak tiers reason from an incomplete picture of the foe rather
+		// than from a corrupted score. Resolved once here so every
+		// decision this slot makes this turn is internally consistent.
+		const foeMon = hazyView(trackedFoe, ctx.infoForgetting, ctx.prng);
 
 		const monId = this.monIdForSlot(side, slotIndex, ctx);
 		const lastMoveId = monId ? ctx.lastMoveByMon.get(monId) : undefined;
@@ -388,7 +393,9 @@ export class HeuristicEngine implements Engine {
 		// 6. Pokerogue-style pick ladder: walk down the sorted list,
 		// advancing with probability proportional to score closeness
 		// (capped per difficulty — difficulty 5 is near-greedy).
-		const chosen = selectByScoreLadder(scored, startIndex, ctx.ladderAdvanceCap, ctx.prng).opt;
+		const chosen = selectByScoreLadder(
+			scored, startIndex, ctx.ladderAdvanceCap, ctx.prng, ctx.ladderRatioExponent
+		).opt;
 		if (monId) ctx.lastMoveByMon.set(monId, chosen.id);
 		ctx.switchCount = Math.max(0, ctx.switchCount - 1);
 		if (chosen.id === "helpinghand") turnPlan.helpingHand = true;
@@ -616,13 +623,10 @@ export class HeuristicEngine implements Engine {
 	): { opt: { id: string, idx: number }, score: number }[] {
 		return moves.map(opt => {
 			const move = moveOf(opt.id);
-			const evalResult = evaluateMove(move, evalCtx);
-			let score = evalResult.score;
-			if (ctx.infoForgetting > 0 && evalCtx.defender.revealedMoves.size > 0 &&
-				ctx.prng.random() < ctx.infoForgetting) {
-				score *= 0.85;
-			}
-			return { opt, score };
+			// Forgetting is applied to the foe *view* in `decideForSlot`,
+			// not to the score: scaling a score down promotes negative
+			// (useless) moves toward zero. See `InfoForgetting`.
+			return { opt, score: evaluateMove(move, evalCtx).score };
 		});
 	}
 
